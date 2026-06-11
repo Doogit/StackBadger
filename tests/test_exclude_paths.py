@@ -25,7 +25,11 @@ from exclusions import (
 )
 from profile import Profile, load_profile
 from tests.conftest import all_tables, endpoints_for_category
-from zap.build_runtime_plan import build_requestor_requests
+from zap.build_runtime_plan import (
+    build_requestor_requests,
+    inject_into_plan,
+    zap_exclude_regexes,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +59,12 @@ def test_path_match_is_case_insensitive_prefix_with_segment_boundary():
 def test_token_rotation_paths_excluded_by_default():
     assert is_excluded_path("/auth/v1/token")
     assert is_excluded_path("/oauth/token")
+
+
+def test_query_and_fragment_stripped_before_match():
+    assert is_excluded_path("/logout?all=1")
+    assert is_excluded_path("/logout#section")
+    assert is_excluded_path("/auth/v1/token?grant_type=refresh_token")
 
 
 def test_table_match_is_exact_and_case_insensitive():
@@ -163,6 +173,61 @@ def test_zap_plan_honors_user_exclude_paths_and_uploads():
         "exclude_paths": ["/custom-wipe", "/upload-csv"],
     }
     assert build_requestor_requests(data) == []
+
+
+def test_zap_context_exclude_regexes_cover_default_paths():
+    regexes = zap_exclude_regexes({})
+    # Keeps the ${TARGET_BASE_URL} token literal for scan-time substitution.
+    assert all(r.startswith("${TARGET_BASE_URL}") for r in regexes)
+    joined = "\n".join(regexes)
+    assert "/logout" in joined
+    assert "/auth/v1/token" in joined
+
+
+def test_inject_into_plan_adds_exclude_paths_to_every_context():
+    plan = {
+        "env": {"contexts": [
+            {"name": "target-authed", "excludePaths": ["${TARGET_BASE_URL}/.*\\.png"]},
+            {"name": "target-anon", "excludePaths": []},
+        ]},
+        "jobs": [{"type": "requestor", "requests": []}],
+    }
+    import re as _re
+    regexes = zap_exclude_regexes({"exclude_paths": ["/custom-wipe"]})
+    inject_into_plan(plan, [], regexes)
+    for context in plan["env"]["contexts"]:
+        patterns = [
+            r.replace("${TARGET_BASE_URL}", "https://site.com")
+            for r in context["excludePaths"]
+        ]
+        # Both the default (/logout) and user path (/custom-wipe) are excluded.
+        assert any(_re.fullmatch(p, "https://site.com/logout") for p in patterns)
+        assert any(_re.fullmatch(p, "https://site.com/custom-wipe") for p in patterns)
+    # Static-asset exclusion preserved on the context that had one.
+    assert any(".png" in r for r in plan["env"]["contexts"][0]["excludePaths"])
+
+
+def test_inject_exclude_paths_is_idempotent():
+    plan = {
+        "env": {"contexts": [{"name": "c", "excludePaths": []}]},
+        "jobs": [{"type": "requestor", "requests": []}],
+    }
+    regexes = zap_exclude_regexes({})
+    inject_into_plan(plan, [], regexes)
+    first = list(plan["env"]["contexts"][0]["excludePaths"])
+    inject_into_plan(plan, [], regexes)
+    assert plan["env"]["contexts"][0]["excludePaths"] == first
+
+
+def test_zap_exclude_regex_respects_segment_boundary():
+    import re as _re
+    regexes = zap_exclude_regexes({"exclude_paths": ["/reset-password"]})
+    rx = next(r for r in regexes if "reset" in r)
+    # Substitute the literal token with a concrete base, then full-match URLs.
+    pattern = rx.replace("${TARGET_BASE_URL}", "https://site.com")
+    assert _re.fullmatch(pattern, "https://site.com/reset-password")
+    assert _re.fullmatch(pattern, "https://site.com/api/reset-password?token=x")
+    assert not _re.fullmatch(pattern, "https://site.com/reset-password-help")
 
 
 # ---------------------------------------------------------------------------

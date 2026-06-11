@@ -27,10 +27,33 @@ heredoc exactly (including non-zero exit on a missing requestor job so the
 from __future__ import annotations
 
 import json
+import re
 
 from exclusions import effective_exclude_paths, is_excluded_path
 
 NIL_UUID = "00000000-0000-0000-0000-000000000000"
+
+
+def zap_exclude_regexes(profile_data, *, base_token="${TARGET_BASE_URL}"):
+    """Build ZAP context excludePaths regexes from the profile's exclude_paths.
+
+    The requestor seam (build_requestor_requests) only stops ZAP from being
+    *seeded* with an excluded endpoint — but the spider crawls public links and
+    activeScan attacks whatever lands in the context, so a linked /logout (or a
+    token-rotation path) would still be probed and could destroy the
+    authenticated session mid-scan. These regexes add those paths to the
+    context excludePaths so the spider and active scanner skip them too.
+
+    ``${TARGET_BASE_URL}`` is kept LITERAL (ZAP substitutes it at scan time),
+    mirroring the static-asset exclusions already in the plan. Each pattern is
+    a full-URL match: ``<base>.*<path>`` with an optional ``[/?]...`` tail so a
+    sub-path or query is covered but a segment-boundary sibling
+    (``/reset-password-help`` vs ``/reset-password``) is not over-excluded.
+    """
+    patterns = []
+    for path in effective_exclude_paths((profile_data or {}).get("exclude_paths")):
+        patterns.append(f"{base_token}.*{re.escape(path)}(?:[/?].*)?")
+    return patterns
 
 
 class RequestorJobNotFound(Exception):
@@ -128,12 +151,32 @@ def build_requestor_requests(profile_data, *, base_token="${TARGET_BASE_URL}"):
     return requests
 
 
-def inject_into_plan(plan_dict, requests):
+def inject_exclude_paths(plan_dict, exclude_regexes):
+    """Append ``exclude_regexes`` to every context's ``excludePaths`` in place.
+
+    Idempotent: a regex already present is not duplicated (so re-running the
+    builder on an already-injected plan is a no-op). Returns ``plan_dict``.
+    """
+    if not exclude_regexes:
+        return plan_dict
+    for context in ((plan_dict.get('env') or {}).get('contexts') or []):
+        existing = context.setdefault('excludePaths', [])
+        for rx in exclude_regexes:
+            if rx not in existing:
+                existing.append(rx)
+    return plan_dict
+
+
+def inject_into_plan(plan_dict, requests, exclude_regexes=None):
     """Inject ``requests`` into the ``requestor`` job of ``plan_dict``.
+
+    Also appends ``exclude_regexes`` to every context's ``excludePaths`` so the
+    spider and active scanner honor the same exclusions as the requestor seam.
 
     Mutates and returns ``plan_dict``. Raises ``RequestorJobNotFound`` when no
     ``requestor`` job exists (mirrors the heredoc's ``sys.exit`` at run.sh:728).
     """
+    inject_exclude_paths(plan_dict, exclude_regexes or [])
     for job in plan_dict.get('jobs', []):
         if job.get('type') == 'requestor':
             job['requests'] = requests
@@ -153,11 +196,12 @@ if __name__ == "__main__":
     profile = load_profile(os.environ['PENTEST_PROFILE'])
     data = profile.raw()
     requests = build_requestor_requests(data)
+    exclude_regexes = zap_exclude_regexes(data)
 
     with open('zap/automation-plan.yaml') as f:
         plan = yaml.safe_load(f)
     try:
-        inject_into_plan(plan, requests)
+        inject_into_plan(plan, requests, exclude_regexes)
     except RequestorJobNotFound as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)

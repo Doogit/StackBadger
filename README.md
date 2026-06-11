@@ -467,7 +467,7 @@ machinery itself and run without a live target.
 
 ### Exit codes
 
-`run.sh` uses four distinct exit codes for CI gating:
+`run.sh` uses these exit codes for CI gating:
 
 | Code | Meaning | Recommended CI action |
 |------|---------|----------------------|
@@ -475,10 +475,13 @@ machinery itself and run without a live target.
 | `1` | HIGH or CRITICAL findings present | Fail build |
 | `2` | MEDIUM or LOW findings only | Warn, do not block |
 | `3` | Infrastructure error (collection failure, missing deps, parse error) | Fail build (harness is broken, not the app) |
+| `10` | Preflight or safety gate failed — the scan never ran | Fail build; fix the reported gate/check and re-run |
 
-> Exit `1` covers **both** HIGH/CRITICAL findings and pre-test harness failures (sign-in error,
-> unreachable target). Distinguish them by checking whether `reports/output/` was produced — see
-> `LAUNCH.md` Step 6.
+> The finding-severity codes (`0`–`3`) come from `reports/aggregate.py`. Code `10` is distinct: it
+> means a pre-scan check refused the run — `doctor.py` preflight (Python version, missing credentials,
+> unreachable target, a User A/B sign-in failure) or a `CONFIRM_TARGET` / `CONFIRM_AUTHORIZED` gate
+> mismatch. No probes fired, so a `10` is never a finding. Run `python doctor.py <url> --json` to see
+> the per-check verdict (it uses granular codes `10`–`19`; `run.sh` collapses any of them to `10`).
 
 ## Known platform-dependent findings
 

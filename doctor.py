@@ -286,6 +286,15 @@ def main(argv: list[str] | None = None) -> int:
         )
     except Exception as exc:  # never let an internal bug masquerade as a finding
         print(f"[FAIL] doctor-internal — unexpected error: {exc}", file=sys.stderr)
+        if args.json:
+            # Keep the stdout=JSON contract even on internal failure so an agent
+            # parsing stdout gets a verdict instead of empty output.
+            print(json.dumps({
+                "passed": False,
+                "exit_code": EXIT_INTERNAL_ERROR,
+                "checks": [],
+                "error": str(exc),
+            }, indent=2))
         return EXIT_INTERNAL_ERROR
 
     _emit(results, exit_code, args.json)

@@ -15,15 +15,30 @@ info() { echo "INFO:  $*"; }
 # "environment not ready / run refused" as "scan ran and found things".
 fail_preflight() { echo "ERROR: $*" >&2; exit 10; }
 
-# Normalize a URL or host for gate comparison: strip scheme, userinfo, path,
-# query, and port; lowercase. Mirrors the host-extraction used for _PROJECT_REF.
+# Normalize a URL or host for gate comparison: strip scheme, fragment, query,
+# path, userinfo, and port; lowercase. Returns the bare host an HTTP client
+# would actually connect to.
+#
+# Order matters for gate integrity: the fragment and query are stripped FIRST,
+# because an HTTP client drops them before host resolution. Stripping userinfo
+# (@) before the fragment would let a crafted URL like
+# 'https://good.com#@evil.com' normalize to 'evil.com' while the client
+# connects to 'good.com' — a target-confusion that defeats the gate.
+# Bracketed IPv6 literals ([::1]) are preserved whole (the :port strip only
+# applies to a port that follows the closing bracket).
 _normalize_host() {
   local h="$1"
-  h="${h#*://}"
-  h="${h%%/*}"
-  h="${h%%\?*}"
-  h="${h##*@}"
-  h="${h%%:*}"
+  h="${h#*://}"      # strip scheme
+  h="${h%%#*}"       # strip fragment (before userinfo — see above)
+  h="${h%%\?*}"      # strip query
+  h="${h%%/*}"       # strip path
+  h="${h##*@}"       # strip userinfo
+  if [[ "$h" == \[*\]* ]]; then
+    # Bracketed IPv6 literal: keep "[....]", drop any trailing :port.
+    h="${h%%\]*}]"
+  else
+    h="${h%%:*}"     # strip :port
+  fi
   printf '%s' "$h" | tr '[:upper:]' '[:lower:]'
 }
 
@@ -218,11 +233,17 @@ trap _cleanup_on_exit EXIT INT TERM
 # redirect (e.g. apex -> www), set the post-redirect canonical host. The values
 # are meant to be set by the HUMAN out-of-band — an agent following LAUNCH.md
 # must not set CONFIRM_AUTHORIZED for itself. --yes (AUTO_YES) does NOT bypass
-# either gate. localhost / 127.0.0.1 are exempt. Placed before the branch-DB
-# lifecycle so a refused run performs zero remote side effects.
+# either gate. localhost / 127.0.0.1 / [::1] are exempt. Placed before the
+# branch-DB lifecycle so a refused run performs zero remote side effects.
+#
+# SCOPE: the gate governs the application host (the URL you point run.sh at).
+# Discovery harvests the target's Supabase project URL from its JS bundle, and
+# PostgREST/IDOR/RLS probes hit that <ref>.supabase.co backend — which is
+# implicitly in scope as the target's own backend. Confirm you are authorized
+# to test the whole deployment, not just the front-end host, before proceeding.
 _GATE_TARGET="${TARGET_BASE_URL:-$TARGET_URL}"
 _TARGET_HOST="$(_normalize_host "$_GATE_TARGET")"
-if [[ "$_TARGET_HOST" != "localhost" && "$_TARGET_HOST" != "127.0.0.1" ]]; then
+if [[ "$_TARGET_HOST" != "localhost" && "$_TARGET_HOST" != "127.0.0.1" && "$_TARGET_HOST" != "[::1]" ]]; then
   if [[ -z "${CONFIRM_TARGET:-}" || "$(_normalize_host "${CONFIRM_TARGET:-}")" != "$_TARGET_HOST" ]]; then
     fail_preflight "CONFIRM_TARGET gate refused: this run would scan '$_TARGET_HOST'. To confirm the target, run:  export CONFIRM_TARGET=$_TARGET_HOST  (exact host match required; --yes does not bypass this gate)"
   fi

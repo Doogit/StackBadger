@@ -22,3 +22,4 @@ zap/automation-plan.runtime.yaml
 !zap/zap-api.env.example
 .venv/
 venv/
+.context/

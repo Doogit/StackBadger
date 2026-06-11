@@ -248,6 +248,20 @@ def test_json_output_is_machine_readable(tmp_path, monkeypatch, capsys):
     assert "[FAIL] user-b-login" in out.err
 
 
+def test_internal_error_emits_json_in_json_mode(monkeypatch, capsys):
+    def _boom(*a, **k):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(doctor, "run_doctor", _boom)
+    rc = doctor.main([TARGET, "--json"])
+    assert rc == doctor.EXIT_INTERNAL_ERROR
+    out = capsys.readouterr()
+    payload = json.loads(out.out)  # stdout must still be valid JSON
+    assert payload["passed"] is False
+    assert payload["exit_code"] == doctor.EXIT_INTERNAL_ERROR
+    assert "kaboom" in payload["error"]
+
+
 def test_human_output_pass_fail_lines(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         doctor, "run_doctor",

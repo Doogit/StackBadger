@@ -96,6 +96,35 @@ def test_localhost_is_exempt(sandbox):
     assert "Discovery / profile assembly failed" in combined
 
 
+def test_ipv6_loopback_is_exempt(sandbox):
+    stub_doctor(sandbox, 0)
+    result = run_sh(sandbox, ["http://[::1]:9"])
+    combined = result.stdout + result.stderr
+    assert "gate refused" not in combined
+    assert "Discovery / profile assembly failed" in combined
+
+
+def test_fragment_does_not_confuse_gate_host(sandbox):
+    # 'https://stub.invalid#@evil.invalid' — an HTTP client connects to
+    # stub.invalid (fragment dropped). The gate must normalize to the same
+    # host, NOT evil.invalid. So CONFIRM_TARGET=stub.invalid proceeds...
+    stub_doctor(sandbox, 0)
+    ok = run_sh(
+        sandbox,
+        ["https://stub.invalid#@evil.invalid"],
+        env_overrides={"CONFIRM_TARGET": HOST, "CONFIRM_AUTHORIZED": HOST},
+    )
+    assert "gate refused" not in (ok.stdout + ok.stderr)
+    # ...and confirming the attacker-supplied fragment host is REFUSED.
+    bad = run_sh(
+        sandbox,
+        ["https://stub.invalid#@evil.invalid"],
+        env_overrides={"CONFIRM_TARGET": "evil.invalid", "CONFIRM_AUTHORIZED": "evil.invalid"},
+    )
+    assert bad.returncode == 10
+    assert "CONFIRM_TARGET gate refused" in bad.stderr
+
+
 def test_gate_runs_before_branch_lifecycle(sandbox):
     # A refused --branch run must not attempt branch creation (remote side
     # effect). The refusal message appears and no branch step is reached.

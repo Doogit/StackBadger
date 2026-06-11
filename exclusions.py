@@ -52,8 +52,11 @@ DEFAULT_EXCLUDE_TABLES: tuple[str, ...] = (
 
 
 def _normalize_path(path: str) -> str:
-    """Lowercase, ensure a single leading slash, strip trailing slashes."""
+    """Lowercase, drop query/fragment, ensure a leading slash, strip trailing slashes."""
     p = str(path).strip().lower()
+    # Drop query and fragment so a declared "/logout?all=1" still matches the
+    # "/logout" exclusion rule.
+    p = p.split("?", 1)[0].split("#", 1)[0]
     if not p.startswith("/"):
         p = "/" + p
     return p.rstrip("/") or "/"
@@ -102,25 +105,3 @@ def is_excluded_table(table: str, exclude_tables: Iterable[str] | None = None) -
         exclude_tables = effective_exclude_tables()
     t = str(table).strip().lower()
     return any(t == str(rule).strip().lower() for rule in exclude_tables)
-
-
-def filter_endpoints(
-    endpoints: list[dict], exclude_paths: Iterable[str] | None = None
-) -> list[dict]:
-    """Return *endpoints* minus entries whose ``path`` is excluded.
-
-    Entries without a ``path`` key pass through unchanged — presence
-    validation belongs to the caller, not the exclusion filter.
-    """
-    effective = (
-        effective_exclude_paths(None)
-        if exclude_paths is None
-        else list(exclude_paths)
-    )
-    result = []
-    for ep in endpoints:
-        path = ep.get("path") if hasattr(ep, "get") else None
-        if path and is_excluded_path(path, effective):
-            continue
-        result.append(ep)
-    return result
