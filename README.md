@@ -1,8 +1,8 @@
 # StackBadger
 
-> _Latin: "to spy out, observe, examine."_
+> _Badger your stack before someone else does._
 
-StackBadger is a portable, profile-driven **black-box API security harness**. It attacks a live web
+StackBadger is a portable, profile-driven **black-box offensive security harness**. It attacks a live web
 application the way an external attacker would — discovering all the configuration it needs from
 the deployed client bundle, signing in as a real user, and running a pytest suite of auth-bypass,
 IDOR, access-control, injection, and misconfiguration probes — then merges the results (plus an
