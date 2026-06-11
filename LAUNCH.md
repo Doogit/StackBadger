@@ -22,6 +22,28 @@ If the target URL was not already given in the prompt, ask for it. Then ask for 
 > Both accounts must exist in the target's auth provider (Clerk, Firebase, Supabase Auth, or a
 > NextAuth credentials provider), with email+password sign-in enabled and **MFA disabled**.
 
+### Step 1a: Authorization gate (human-set, machine-enforced)
+
+Authorization must be affirmed by the **human**, out-of-band — do NOT set these
+variables yourself, and do not proceed until the user confirms they have set them:
+
+- [ ] I confirm I'm authorized to test {TARGET}
+
+> Before I can run anything, you (not I) must affirm authorization in your shell.
+> Run these two exports — `run.sh` refuses any remote scan without them:
+>
+> ```bash
+> export CONFIRM_TARGET=<target host>       # e.g. staging.example.com — exact host, no scheme/port
+> export CONFIRM_AUTHORIZED=<target host>   # affirms you own / are authorized in writing to test it
+> ```
+>
+> No subdomain cross-match (`api.example.com` != `example.com`). For a site that
+> redirects (apex -> www), use the post-redirect canonical host. Only do this for
+> systems you own or are explicitly authorized, in writing, to test.
+
+If `run.sh` later refuses with a `CONFIRM_TARGET` / `CONFIRM_AUTHORIZED` gate
+error, relay the message to the user and wait — never set the variables yourself.
+
 ### Step 1b: Select test mode
 
 > **Test mode:**

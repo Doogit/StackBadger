@@ -24,6 +24,14 @@ test accounts and a non-production environment whenever possible. See
 [SECURITY.md](SECURITY.md) for the full authorization expectation, what `--full`
 write probes do, and how to report a vulnerability in StackBadger itself.
 
+Authorization is **machine-enforced**, not just a checkbox: `run.sh` refuses to
+scan any non-localhost host (read-only mode included) unless both
+`CONFIRM_TARGET=<host>` ("this is the right host") and
+`CONFIRM_AUTHORIZED=<host>` ("a human affirmed authorization") exact-match the
+target's host. `CONFIRM_AUTHORIZED` must be set by the site owner out-of-band —
+an AI agent running the harness must never set it for itself — and `--yes` does
+not bypass either gate. See `.env.example` for the exact format.
+
 ## What makes it portable
 
 StackBadger's pytest suite is **stack-agnostic**: it ships auth adapters and attack modules for a range
