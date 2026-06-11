@@ -1,0 +1,50 @@
+# Example profile — Supabase Auth (GoTrue) + Supabase database + Supabase Storage.
+#
+# A full Supabase stack where Supabase Auth (GoTrue) is the identity provider,
+# not just the database. This MUST be named explicitly: supabase-js statically
+# bundles the GoTrue client even for database-only use, so a static bundle scan
+# cannot distinguish a Supabase-Auth target from a Clerk-auth + Supabase-database
+# one. Live discovery will not auto-select `supabase-auth` — declare it here.
+#
+# All hosts are reserved placeholders, so `--profile` runs against this file
+# skip every live probe. Copy it and repoint `target.base_url` at your own site.
+
+target:
+  base_url: "https://example.com"
+  api_prefix: "/api"
+
+stack:
+  auth: supabase-auth
+  database: supabase
+  storage: supabase
+
+supabase:
+  # project_url is required for the GoTrue sign-in adapter. It auto-discovers
+  # from the target bundle; set it explicitly to override (e.g. a staging
+  # project). anon_key likewise auto-discovers.
+  # project_url: "https://your-project.supabase.co"
+  # anon_key: "eyJhbGci..."
+  storage_buckets:
+    - user-files
+  tables:
+    user_facing:
+      - documents
+      - projects
+    public_read_only:
+      - public_posts
+    service_role_only:
+      - audit_log
+  table_pks:
+    documents: document_id
+    projects: project_id
+
+endpoints:
+  authenticated:
+    - path: /api/user/profile
+      method: GET
+
+test_accounts:
+  user_a:
+    email: "pentest-a@example.com"
+  user_b:
+    email: "pentest-b@example.com"

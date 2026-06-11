@@ -1,0 +1,130 @@
+# Example profile — Clerk + Supabase + Stripe on Netlify.
+#
+# A reference profile for the canonical no-profile stack, written out so you can
+# see every section. Copy it, point `target.base_url` at your site, and replace
+# the example resources (tables, endpoints, RPCs) with your own. For a URL-only
+# black-box run you do not need a profile at all — live discovery fills this in.
+#
+# Provider credentials (Supabase project URL + anon key, Clerk FAPI host) are
+# auto-discovered from the target's JS bundle; the commented blocks below are
+# only needed to override discovery (e.g. a staging project).
+
+target:
+  base_url: "https://example.com"
+  api_prefix: "/.netlify/functions"   # Netlify Functions. Use /api for Vercel, etc.
+
+stack:
+  auth: clerk
+  database: supabase
+  storage: supabase
+  payments: stripe
+  hosting: netlify
+
+supabase:
+  # project_url and anon_key are auto-discovered from the target site's JS bundle.
+  # Uncomment to override (e.g. point at a staging Supabase project):
+  # project_url: "https://your-project.supabase.co"
+  # anon_key: "eyJhbGci..."
+  storage_buckets:
+    - user-files
+  tables:
+    user_facing:          # Per-user rows — must be RLS-scoped to the owner.
+      - documents
+      - projects
+      - comments
+    public_read_only:     # Readable without auth (e.g. published content).
+      - public_posts
+    service_role_only:    # Must be unreachable with the anon key.
+      - audit_log
+      - billing_events
+  table_pks:
+    documents: document_id
+    projects: project_id
+    comments: comment_id
+
+clerk:
+  # frontend_api is auto-discovered from the Clerk publishable key in the bundle.
+  # Uncomment to override:
+  # frontend_api: "https://clerk.example.com"
+
+endpoints:
+  authenticated:
+    - path: /list-documents
+      method: POST
+      probe_body: {"project_id": "{{uuid}}"}
+    - path: /update-document
+      method: POST
+      probe_body: {"document_id": "{{uuid}}", "title": "probe"}
+    - path: /export-document
+      method: POST
+      payment_gated: true
+      probe_body: {"document_id": "{{uuid}}"}
+  anonymous:
+    - path: /public-feed
+      method: POST
+      probe_body: {"anon_session_id": "{{uuid}}"}
+      fully_anonymous: true
+  webhook:
+    - path: /clerk-webhook
+      method: POST
+      signature: svix
+    - path: /stripe-webhook
+      method: POST
+      signature: stripe
+  internal:
+    - path: /notify-user
+      method: POST
+      probe_body: {"email": "test@test.com"}
+  payment:
+    - path: /create-checkout-session
+      method: POST
+      probe_body: {"document_id": "{{uuid}}", "success_url": "{{base_url}}/success", "cancel_url": "{{base_url}}/cancel"}
+
+supabase_rpcs:
+  client_callable:
+    - name: merge_anon_session
+      params: [anon_id]
+      risk: high
+    - name: update_document_status
+      params: [p_document_id, p_status]
+      risk: medium
+  server_only:
+    - name: replace_document_body
+    - name: increment_rate_limit
+
+payment_gate:
+  table: users
+  column: paid_at
+  checkout_fields:
+    - document_id
+    - success_url
+    - cancel_url
+
+uploads:
+  endpoint: /import-csv
+  format: csv
+  valid_fixture: fixtures/records.csv   # Representative well-formed CSV upload.
+
+features:
+  anon_sessions: true
+
+custom_headers:
+  anon_session: "x-anon-session"
+
+# Markers that, if echoed in an error response, indicate an information leak.
+sensitive_patterns:
+  - "node_modules"
+  - "at Object."
+  - "Error: ENOENT"
+  - "SyntaxError"
+  - "UnhandledPromiseRejection"
+  - "/var/task/"
+  - "netlify/functions/"
+  - "42703"   # Postgres: undefined column
+  - "42P01"   # Postgres: undefined table
+
+test_accounts:
+  user_a:
+    email: "pentest-a@example.com"
+  user_b:
+    email: "pentest-b@example.com"

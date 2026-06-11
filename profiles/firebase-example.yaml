@@ -1,0 +1,61 @@
+target:
+  base_url: "https://your-firebase-app.web.app"
+  api_prefix: "/api"  # Adjust for your hosting (Vercel, Cloud Run, etc.)
+
+stack:
+  auth: firebase
+  database: firestore
+  storage: firebase
+  # payments: paddle  # Uncomment if applicable
+
+firebase:
+  # Auto-discovered from JS bundle AIza... key:
+  api_key: "AIza..."  # TODO: fill in or let discovery populate
+  project_id: "your-project-id"  # TODO: fill in
+  storage_bucket: "your-project-id.appspot.com"
+  firestore_collections:
+    - users
+    - orders
+    - documents
+  test_document_ids:
+    # Pre-existing documents owned by each test account.
+    # Required for positive controls in Firestore Security Rules tests.
+    user_a: "doc-id-owned-by-user-a"  # TODO: fill in
+    user_b: "doc-id-owned-by-user-b"  # TODO: fill in
+  test_storage_paths:
+    # Pre-existing files in Firebase Storage for positive controls.
+    user_a: "users/uid-a/test-file.pdf"  # TODO: fill in
+    user_b: "users/uid-b/test-file.pdf"  # TODO: fill in
+
+# NextAuth config (uncomment if stack.auth: nextauth)
+# nextauth:
+#   signin_path: "/api/auth/callback/credentials"  # default
+#   session_path: "/api/auth/session"  # default
+
+# AWS S3 config (uncomment if stack.storage: s3)
+# aws:
+#   s3_bucket: "my-bucket"
+#   s3_region: "us-east-1"
+#   presigned_url_endpoint: "/api/files/presign"  # App endpoint that issues presigned URLs
+
+# Cloudflare R2 config (uncomment if stack.storage: r2)
+# cloudflare:
+#   r2_account_id: "your-account-id"
+#   r2_bucket: "my-bucket"
+
+# Payment webhook paths
+# payments:
+#   paddle_webhook_path: "/api/webhooks/paddle"
+#   lemonsqueezy_webhook_path: "/api/webhooks/lemonsqueezy"
+
+endpoints:
+  authenticated:
+    - path: /api/user/profile
+      method: GET
+  # Add your endpoints here
+
+test_accounts:
+  user_a:
+    email: "pentest-a@example.com"
+  user_b:
+    email: "pentest-b@example.com"

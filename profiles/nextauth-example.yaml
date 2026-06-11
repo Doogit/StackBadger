@@ -1,0 +1,42 @@
+# Example profile — NextAuth / Auth.js (cookie auth) + Supabase database.
+#
+# NextAuth signs in with a CSRF-protected form post and carries a session
+# **cookie** (not a Bearer token). run.sh signs in via the nextauth adapter and
+# runs the full pytest suite; the optional ZAP scan is skipped on this path
+# because ZAP seeding assumes a Bearer header.
+#
+# All hosts are reserved placeholders, so `--profile` runs against this file
+# skip every live probe. Copy it and repoint `target.base_url` at your own site.
+
+target:
+  base_url: "https://example.com"
+  api_prefix: "/api"
+
+stack:
+  auth: nextauth
+  database: supabase
+  storage: supabase
+
+# NextAuth endpoint paths (the defaults shown — override only if your app
+# mounts the Auth.js handler somewhere other than /api/auth).
+nextauth:
+  signin_path: "/api/auth/callback/credentials"
+  session_path: "/api/auth/session"
+  csrf_path: "/api/auth/csrf"
+
+supabase:
+  # project_url and anon_key auto-discover from the target bundle.
+  tables:
+    user_facing:
+      - documents
+
+endpoints:
+  authenticated:
+    - path: /api/user/profile
+      method: GET
+
+test_accounts:
+  user_a:
+    email: "pentest-a@example.com"
+  user_b:
+    email: "pentest-b@example.com"

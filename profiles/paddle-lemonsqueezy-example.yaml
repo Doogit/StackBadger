@@ -1,0 +1,49 @@
+# Example profile — Clerk auth + Supabase database + Paddle / LemonSqueezy billing.
+#
+# Demonstrates the Paddle and LemonSqueezy webhook signature probes (missing,
+# empty, forged, and body-mismatch signatures). Declare each provider you use
+# under `stack.payments` and give it a webhook path in the `payments` block.
+#
+# All hosts are reserved placeholders, so `--profile` runs against this file
+# skip every live probe. Copy it and repoint `target.base_url` at your own site.
+
+target:
+  base_url: "https://example.com"
+  api_prefix: "/api"
+
+stack:
+  auth: clerk
+  database: supabase
+  payments:          # A list — include only the providers your target uses.
+    - paddle
+    - lemonsqueezy
+
+supabase:
+  # project_url and anon_key auto-discover from the target bundle.
+  tables:
+    user_facing:
+      - subscriptions
+
+payments:
+  paddle_webhook_path: "/api/webhooks/paddle"
+  lemonsqueezy_webhook_path: "/api/webhooks/lemonsqueezy"
+  # Webhook secrets are NOT required — the probes verify that the endpoint
+  # rejects unsigned/forged requests, which needs no secret. Provide one only to
+  # exercise the positive (valid-signature) control:
+  # paddle_webhook_secret: ""
+  # lemonsqueezy_webhook_secret: ""
+
+endpoints:
+  webhook:
+    - path: /api/webhooks/paddle
+      method: POST
+      signature: paddle
+    - path: /api/webhooks/lemonsqueezy
+      method: POST
+      signature: lemonsqueezy
+
+test_accounts:
+  user_a:
+    email: "pentest-a@example.com"
+  user_b:
+    email: "pentest-b@example.com"

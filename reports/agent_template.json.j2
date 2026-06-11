@@ -1,0 +1,31 @@
+{
+  "generated_at": "{{ generated_at }}",
+  "finding_count": {{ findings | length }},
+  "findings": [
+    {% for f in findings %}
+    {
+      "id": {{ f.id | tojson }},
+      "title": {{ f.title | tojson }},
+      "severity": {{ f.severity | tojson }},
+      "category": {{ f.category | tojson }},
+      "source": {{ f.source | tojson }},
+      "endpoint": {{ f.endpoint | tojson }},
+      "method": {{ f.method | tojson }},
+      "description": {{ f.description | tojson }},
+      "evidence": {
+        "request": {{ f.evidence.request | tojson }},
+        "response": {{ f.evidence.response | tojson }}
+      },
+      "affected_files": {{ f.affected_files | tojson }},
+      "false_positive": {{ f.false_positive | tojson }},
+      "known_exception_reason": {{ f.known_exception_reason | tojson }},
+      "root_cause": {{ f.root_cause | tojson }},
+      "remediation_plan": {{ f.remediation_plan | tojson }},
+      "test_to_verify": {{ f.test_to_verify | tojson }},
+      "related_findings": {{ f.related_findings | tojson }},
+      "scope_estimate": {{ f.scope_estimate | tojson }}
+    }{% if not loop.last %},{% endif %}
+
+    {% endfor %}
+  ]
+}

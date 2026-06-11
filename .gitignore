@@ -1,0 +1,24 @@
+# Runtime artifacts
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+report.json
+
+# Internal planning docs (local only — not for publication)
+docs/plans/
+
+# Generated files
+reports/output/
+reports/evidence/
+reports/pytest-report.json
+reports/zap-report.json
+fixtures/records_oversized.csv
+zap/automation-plan.runtime.yaml
+
+# Environment
+.env
+*.env
+!zap/zap-api.env.example
+.venv/
+venv/

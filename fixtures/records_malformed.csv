@@ -1,0 +1,5 @@
+ÿþrecord_id,record_date,line_number,item_ordinal,item_code,line_value_amount,line_fee_amount,record_type,lifecycle_status,lifecycle_date
+TST00000011,03/01/2025,1,1,ITEM-1001,12500.00,0.00,01,open,04/15/2025,
+
+TST00000024,03/05/2025,1,1,ITEM-1002,45000.00,0.00,01,closed,04/10/2025,XX,EXTRA_COLUMN
+TST00000037,03/10/2025,1,2,ITEM-2001,0.00,3125.00,01,closed,04/15/2025,XX,EXTRA,

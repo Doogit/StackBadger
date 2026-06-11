@@ -1,0 +1,274 @@
+---
+# ZAP Automation Framework Plan
+# Runner: docker run --env-file zap-api.env.example \
+#           -v "${REPORT_DIR}:/zap/reports" \
+#           ghcr.io/zaproxy/zaproxy:stable \
+#           zap.sh -cmd -autorun /zap/wrk/automation-plan.yaml
+#
+# Strategy: requestor (seed authed endpoints) → traditionalSpider (public) →
+#            passiveScan → activeScan → report
+# Max duration: 30 minutes
+# Auth: injected via replacer job (HTTP header). run.sh supplies ONE of:
+#   - Bearer JWT     → ${JWT_TOKEN}      (Clerk / Firebase / Supabase-Auth)
+#   - session Cookie → ${SESSION_COOKIE} (NextAuth / Auth.js)
+#   Both replacer rules are always present; the unused variable is passed empty.
+#   The Cookie rule with an empty value injects no Cookie header; the Bearer
+#   rule with an empty token injects a bare "Authorization: Bearer " header,
+#   which authenticated targets ignore. One plan covers both bearer- and
+#   cookie-based stacks.
+# Reason for requestor-not-AJAX: auth is header-based (a Bearer JWT or a
+#   seeded Cookie header). AJAX spider navigates via the browser cookie jar,
+#   which the replacer does not populate; the requestor→activeScan path carries
+#   the injected auth header into the authenticated active scan instead.
+
+env:
+  contexts:
+    - name: target-authed
+      urls:
+        - "${TARGET_BASE_URL}/.netlify/functions"
+      includePaths:
+        - "${TARGET_BASE_URL}/.*"
+      excludePaths:
+        - "${TARGET_BASE_URL}/.*\\.png"
+        - "${TARGET_BASE_URL}/.*\\.jpg"
+        - "${TARGET_BASE_URL}/.*\\.svg"
+        - "${TARGET_BASE_URL}/.*\\.ico"
+        - "${TARGET_BASE_URL}/.*\\.woff2?"
+        - "${TARGET_BASE_URL}/.*\\.css"
+        - "${TARGET_BASE_URL}/.*\\.js\\.map"
+      authentication:
+        method: "http"
+        parameters:
+          loginPageUrl: ""
+          loginRequestData: ""
+        verification:
+          method: "response"
+          pollFrequency: 60
+          pollUnits: "requests"
+          loggedInRegex: "\\Qsub\\E"
+          loggedOutRegex: "\\Qunauthorized\\E"
+      sessionManagement:
+        method: "httpAuthSessionManagement"
+      users:
+        - name: "pentest-user"
+          credentials:
+            username: "pentest-a@example.com"
+            password: ""
+
+    - name: target-anon
+      urls:
+        - "${TARGET_BASE_URL}/.netlify/functions"
+      includePaths:
+        - "${TARGET_BASE_URL}/.*"
+      excludePaths:
+        - "${TARGET_BASE_URL}/.*\\.png"
+        - "${TARGET_BASE_URL}/.*\\.jpg"
+        - "${TARGET_BASE_URL}/.*\\.svg"
+        - "${TARGET_BASE_URL}/.*\\.ico"
+        - "${TARGET_BASE_URL}/.*\\.woff2?"
+        - "${TARGET_BASE_URL}/.*\\.css"
+        - "${TARGET_BASE_URL}/.*\\.js\\.map"
+
+  parameters:
+    failOnError: true
+    failOnWarning: false
+    progressToStdout: true
+
+jobs:
+  # ── 1. Replacer: inject auth headers on every outbound request ──────────────
+  - type: replacer
+    parameters:
+      deleteAllRules: false
+    rules:
+      - description: "Inject Bearer token (Clerk / Firebase / Supabase-Auth)"
+        matchType: "req_header"
+        matchString: "Authorization"
+        matchRegex: false
+        replacement: "Bearer ${JWT_TOKEN}"
+        initiators: []
+        enabled: true
+
+      # Cookie-based auth (NextAuth / Auth.js). ${SESSION_COOKIE} is empty for
+      # bearer stacks, making this an inert empty-header injection there.
+      - description: "Inject session Cookie (NextAuth / Auth.js)"
+        matchType: "req_header"
+        matchString: "Cookie"
+        matchRegex: false
+        replacement: "${SESSION_COOKIE}"
+        initiators: []
+        enabled: true
+
+      - description: "Inject Supabase anon key"
+        matchType: "req_header"
+        matchString: "apikey"
+        matchRegex: false
+        replacement: "${SUPABASE_ANON_KEY}"
+        initiators: []
+        enabled: true
+
+  # ── 2. Requestor: seed ZAP site tree with the profile's API endpoints ───────
+  # The `requests:` list is GENERATED AT RUNTIME by run.sh from the active
+  # profile's endpoints (authenticated / anonymous / payment / internal /
+  # webhook, plus the upload endpoint). run.sh reads $PENTEST_RUNTIME_PROFILE_PATH,
+  # builds one request per declared endpoint, and writes a runtime copy of this
+  # plan (automation-plan.runtime.yaml) that ZAP actually runs. No endpoints are
+  # hardcoded here, so the plan is portable across stacks. The empty list below
+  # is the skeleton; if run.sh's injection step is skipped, ZAP simply seeds no
+  # endpoints and the spider still crawls public pages.
+  - type: requestor
+    parameters:
+      user: "pentest-user"
+    requests: []
+
+  # ── 3. Traditional spider: crawl public pages only ──────────────────────────
+  # Intentionally not AJAX spider: bearer auth is header-based (Bearer JWT),
+  # not cookie-based, so headless browser navigation yields no authed pages.
+  - type: spider
+    parameters:
+      context: target-anon
+      url: "${TARGET_BASE_URL}"
+      maxDuration: 5          # minutes; capped so it doesn't eat the budget
+      maxDepth: 3
+      maxChildren: 10
+      acceptCookies: false
+      handleParameters: "use_all"
+      handleODataParametersVisited: false
+      parseComments: false
+      parseGit: false
+      parseSvnEntries: false
+      parseRobotsTxt: true
+      parseSitemapXml: true
+      postForm: false
+      processForm: false
+      requestWaitTime: 200    # ms between requests
+      sendRefererHeader: true
+      threadCount: 2
+      userAgent: "ZAP-pentest/1.0 StackBadger"
+
+  # ── 4. Passive scan configuration ───────────────────────────────────────────
+  - type: passiveScan-config
+    parameters:
+      maxAlertsPerRule: 10
+      scanOnlyInScope: true
+      enableTags: false
+      disableAllRules: false
+    rules:
+      # Ensure header/cookie/CSP checks are active
+      - id: 10010   # Cookie No HttpOnly Flag
+        threshold: LOW
+      - id: 10011   # Cookie Without Secure Flag
+        threshold: LOW
+      - id: 10015   # Incomplete or No Cache-control Header Set
+        threshold: LOW
+      - id: 10016   # Web Browser XSS Protection Not Enabled
+        threshold: LOW
+      - id: 10017   # Cross-Domain JavaScript Source File Inclusion
+        threshold: LOW
+      - id: 10020   # X-Frame-Options Header Not Set
+        threshold: MEDIUM
+      - id: 10021   # X-Content-Type-Options Header Missing
+        threshold: LOW
+      - id: 10035   # Strict-Transport-Security Header Not Set
+        threshold: MEDIUM
+      - id: 10036   # Server Leaks Version Information via "Server" HTTP Response Header Field
+        threshold: LOW
+      - id: 10038   # Content Security Policy (CSP) Header Not Set
+        threshold: MEDIUM
+      - id: 10040   # Secure Pages Include Mixed Content
+        threshold: MEDIUM
+      - id: 10054   # Cookie Without SameSite Attribute
+        threshold: LOW
+      - id: 10055   # CSP Scanner
+        threshold: MEDIUM
+      - id: 10096   # Timestamp Disclosure
+        threshold: LOW
+      - id: 10098   # Cross-Domain Misconfiguration
+        threshold: MEDIUM
+      - id: 10105   # Weak Authentication Method
+        threshold: HIGH
+      - id: 90033   # Loosely Scoped Cookie
+        threshold: LOW
+
+  # ── 5. Passive scan wait ────────────────────────────────────────────────────
+  - type: passiveScan-wait
+    parameters:
+      maxDuration: 5          # minutes
+
+  # ── 6. Active scan ──────────────────────────────────────────────────────────
+  # Targets the seeded API endpoints from the requestor job.
+  # Webhooks excluded: signature verification means active scan payloads are
+  # rejected before reaching application logic — findings would be false positives.
+  - type: activeScan
+    parameters:
+      context: target-authed
+      policy: ""              # use default scan policy
+      maxDuration: 20         # minutes; leaves 5 min buffer in 30-min budget
+      maxRuleDurationInMins: 5
+      maxScanDurationInMins: 20
+      threadPerHost: 4
+      delayInMs: 0
+      addQueryParam: false
+      handleAntiCSRFTokens: true
+      injectPluginIdInHeader: false
+      scanHeadersAllRequests: true
+    policyDefinition:
+      defaultStrength: MEDIUM
+      defaultThreshold: MEDIUM
+      rules:
+        # SQLi
+        - id: 40018   # SQL Injection
+          strength: HIGH
+          threshold: MEDIUM
+        # XSS
+        - id: 40012   # Cross Site Scripting (Reflected)
+          strength: HIGH
+          threshold: MEDIUM
+        - id: 40014   # Cross Site Scripting (Persistent)
+          strength: HIGH
+          threshold: MEDIUM
+        # Path traversal
+        - id: 6       # Path Traversal
+          strength: HIGH
+          threshold: MEDIUM
+        # CSRF
+        - id: 20012   # Anti-CSRF Tokens Scanner
+          strength: MEDIUM
+          threshold: MEDIUM
+        # Command injection
+        - id: 90020   # Remote OS Command Injection
+          strength: HIGH
+          threshold: MEDIUM
+        # SSRF
+        - id: 40046   # Server Side Request Forgery
+          strength: HIGH
+          threshold: MEDIUM
+        # XXE
+        - id: 90021   # XPath Injection
+          strength: MEDIUM
+          threshold: MEDIUM
+        # Open redirect
+        - id: 20019   # External Redirect
+          strength: MEDIUM
+          threshold: MEDIUM
+        # Skip webhook/stripe endpoints — signature-rejected before logic
+        # (excluded via context scope, not rule disable)
+
+  # ── 7. Report ────────────────────────────────────────────────────────────────
+  - type: report
+    parameters:
+      template: traditional-json-plus
+      reportDir: "${REPORT_DIR}"
+      reportFile: "zap-report"
+      reportTitle: "API Security Pentest Report"
+      reportDescription: "ZAP Automation Framework scan — requestor-seeded API endpoints"
+      displayReport: false
+    risks:
+      - high
+      - medium
+      - low
+      - info
+    confidences:
+      - high
+      - medium
+      - low
+      - falsepositive

@@ -1,0 +1,49 @@
+# Example profile — Clerk auth + Supabase database + S3 / R2 object storage.
+#
+# Demonstrates the S3 and Cloudflare R2 storage probes (presigned-URL IDOR,
+# path injection, public-bucket exposure). Both backends use the S3 API, so they
+# share one profile shape — declare `stack.storage: s3` with an `aws` block, or
+# `stack.storage: r2` with a `cloudflare` block (the commented alternative below).
+#
+# All hosts are reserved placeholders, so `--profile` runs against this file
+# skip every live probe. Copy it, repoint `target.base_url` at your own
+# deployment, and fill in the real bucket details.
+
+target:
+  base_url: "https://example.com"
+  api_prefix: "/api"
+
+stack:
+  auth: clerk
+  database: supabase
+  storage: s3        # Use `r2` for Cloudflare R2 (see the cloudflare block below).
+
+supabase:
+  # project_url and anon_key auto-discover from the target bundle.
+  tables:
+    user_facing:
+      - documents
+
+# AWS S3 storage (active when stack.storage: s3).
+aws:
+  s3_bucket: "your-bucket"
+  s3_region: "us-east-1"
+  presigned_url_endpoint: "/api/files/presign"   # App endpoint that issues presigned URLs.
+
+# Cloudflare R2 storage (uncomment and set stack.storage: r2 instead).
+# R2 speaks the S3 API; the same presigned_url_endpoint applies.
+# cloudflare:
+#   r2_account_id: "your-account-id"   # -> https://your-account-id.r2.cloudflarestorage.com
+#   r2_bucket: "your-bucket"
+
+endpoints:
+  authenticated:
+    - path: /api/files/presign
+      method: POST
+      probe_body: {"object_key": "{{uuid}}"}
+
+test_accounts:
+  user_a:
+    email: "pentest-a@example.com"
+  user_b:
+    email: "pentest-b@example.com"
