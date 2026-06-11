@@ -40,3 +40,21 @@ test_accounts:
     email: "pentest-a@example.com"
   user_b:
     email: "pentest-b@example.com"
+
+# --- Probe exclusions (optional; defaults are ALWAYS enforced) ---
+# Effective list = union(your entries, built-in defaults) — an empty or absent
+# list still leaves the defaults on. See exclusions.py for the default lists.
+#
+# exclude_paths: application-layer endpoint paths probes must never hit
+# (session/state-destroying: /logout, /signout, /delete-account,
+# /reset-password, token-rotation paths, ...). Path-prefix, case-insensitive,
+# segment-boundary matched. NOTE: this covers endpoint paths ONLY — it does
+# NOT cover PostgREST table probes (/rest/v1/<table>?id=eq.<uuid>); those are
+# driven by supabase.tables and gated by exclude_tables.
+# exclude_paths:
+#   - /admin/reset-demo
+#
+# exclude_tables: table names (as listed under supabase.tables) to skip in the
+# PostgREST/IDOR table enumeration. Exact-name, case-insensitive.
+# exclude_tables:
+#   - dangerous_audit_table

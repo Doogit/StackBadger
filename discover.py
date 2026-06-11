@@ -20,6 +20,7 @@ from typing import Any
 
 import yaml
 
+from exclusions import is_excluded_path
 from providers import ProviderManifest
 
 
@@ -261,6 +262,11 @@ def discover_endpoints(root: Path, stack: dict[str, str]) -> dict[str, list[dict
     for func_file in deduped:
         text = _read_text(func_file)
         path = _endpoint_path(func_file, root, hosting)
+        # Default-on probe exclusions (session/state-destroying endpoints,
+        # e.g. /logout): never emit them into a generated profile, so no
+        # downstream seam can probe them. See exclusions.py.
+        if is_excluded_path(path):
+            continue
         method = _extract_method(text)
         auth = _classify_auth(text, func_file)
 

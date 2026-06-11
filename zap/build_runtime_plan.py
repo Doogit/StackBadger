@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import json
 
+from exclusions import effective_exclude_paths, is_excluded_path
+
 NIL_UUID = "00000000-0000-0000-0000-000000000000"
 
 
@@ -49,6 +51,12 @@ def build_requestor_requests(profile_data, *, base_token="${TARGET_BASE_URL}"):
     base = base_token  # ZAP env-substitution token, kept literal
     prefix = ((data.get('target') or {}).get('api_prefix') or '/.netlify/functions').rstrip('/')
     endpoints = data.get('endpoints') or {}
+    # Default-on probe exclusions (shared filter — same rules as the pytest
+    # enumeration seam and discover.py, so no seam leaks an excluded path).
+    exclude_paths = effective_exclude_paths(data.get('exclude_paths'))
+
+    def excluded(path):
+        return is_excluded_path(str(path), exclude_paths)
 
     def resolve(v):
         if isinstance(v, str):
@@ -96,19 +104,19 @@ def build_requestor_requests(profile_data, *, base_token="${TARGET_BASE_URL}"):
     requests = []
     for cat in ('authenticated', 'payment', 'internal'):
         for ep in (endpoints.get(cat) or []):
-            if isinstance(ep, dict) and ep.get('path'):
+            if isinstance(ep, dict) and ep.get('path') and not excluded(ep['path']):
                 requests.append(req(ep['path'], ep.get('method', 'POST'), bearer, body_for(ep)))
     for ep in (endpoints.get('anonymous') or []):
-        if isinstance(ep, dict) and ep.get('path'):
+        if isinstance(ep, dict) and ep.get('path') and not excluded(ep['path']):
             requests.append(req(ep['path'], ep.get('method', 'POST'), anon, body_for(ep)))
     for ep in (endpoints.get('webhook') or []):
-        if isinstance(ep, dict) and ep.get('path'):
+        if isinstance(ep, dict) and ep.get('path') and not excluded(ep['path']):
             requests.append(
                 req(ep['path'], ep.get('method', 'POST'), webhook_headers(ep.get('signature')), body_for(ep))
             )
     # Upload endpoint (file-upload abuse surface) — seeded as an anon CSV POST.
     uploads = data.get('uploads') or {}
-    if isinstance(uploads, dict) and uploads.get('endpoint'):
+    if isinstance(uploads, dict) and uploads.get('endpoint') and not excluded(uploads['endpoint']):
         requests.append(
             req(
                 uploads['endpoint'],
