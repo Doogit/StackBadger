@@ -351,6 +351,15 @@ def _project_ref_from_url(project_url: str) -> str | None:
     return m.group(1) if m else None
 
 
+# Every Admin API call sends the service-role key (Authorization + apikey
+# headers) to whatever host this URL names — a typoed or attacker-supplied
+# host would receive the project's root credential. Fail closed unless the
+# URL is exactly an https://<ref>.supabase.co origin (single host label, no
+# port, no path); custom domains / self-hosted Supabase require the explicit
+# --allow-custom-domain opt-in.
+_SUPABASE_HOST_RE = re.compile(r"^https://[a-z0-9-]+\.supabase\.co$", re.IGNORECASE)
+
+
 # ---------------------------------------------------------------------------
 # Provision / cleanup flows
 # ---------------------------------------------------------------------------
@@ -365,6 +374,16 @@ def _resolve_project_url(args, env: dict[str, str]) -> str:
     if not project_url.startswith("https://"):
         raise RuntimeError(
             f"Supabase project URL must use https://, got: {project_url[:40]}"
+        )
+    if not _SUPABASE_HOST_RE.match(project_url) and not getattr(
+        args, "allow_custom_domain", False
+    ):
+        raise RuntimeError(
+            f"Refusing to send the service-role key to '{project_url[:80]}': it "
+            "is not an https://<ref>.supabase.co origin. A typoed or malicious "
+            "host here would receive your project's root credential. If this "
+            "really is your project on a custom domain or self-hosted Supabase, "
+            "re-run with --allow-custom-domain."
         )
     return project_url
 
@@ -583,6 +602,10 @@ def main(argv: list[str] | None = None, http=None) -> int:
                         help="Delete the accounts recorded in .env instead of creating them.")
     parser.add_argument("--project-url", default=None,
                         help="Supabase project URL (default: SUPABASE_PROJECT_URL from env/.env).")
+    parser.add_argument("--allow-custom-domain", action="store_true",
+                        help="Permit a non-*.supabase.co project URL (custom domain / "
+                             "self-hosted). Off by default: the Admin API calls carry the "
+                             "service-role key, so an unrecognized host is refused.")
     parser.add_argument("--env-file", default=str(_DEFAULT_ENV_FILE), help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 

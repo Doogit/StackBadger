@@ -268,7 +268,9 @@ after any state loss recovers the same accounts — resetting their password —
 orphaning them. It needs the project **service-role key** (`SUPABASE_SERVICE_ROLE_KEY` in `.env`;
 see `.env.example`). `SUPABASE_ACCESS_TOKEN` — the Management API token used by `--branch` — can
 **not** call the Admin API; the script only uses it, optionally, to fetch the service-role key.
-Re-running is idempotent, and the key is never echoed.
+Re-running is idempotent, and the key is never echoed. As a credential-exfiltration guard, the
+script refuses to talk to any project URL that is not an `https://<ref>.supabase.co` origin —
+custom-domain or self-hosted Supabase needs the explicit `--allow-custom-domain` flag.
 
 > **Do not seed accounts with raw SQL** (`INSERT INTO auth.users ...`): GoTrue scans NULL token
 > columns into non-nullable strings and every subsequent login fails with

@@ -190,14 +190,21 @@ def _build_adapter(target_url: str, profile_path: str | None):
 def _check_verify_path(target_url: str, verify_path: str, headers: dict, who: str):
     """Request the profile's auth.verify_path with one account's headers.
 
+    ``verify_path`` is ROOT-relative: it resolves against the ORIGIN of
+    *target_url*, not against any path prefix the target URL carries. For
+    ``https://example.com/app`` + ``/api/me`` the probe goes to
+    ``https://example.com/api/me`` (urljoin semantics for a leading-slash
+    path), never ``.../app/api/me``.
+
     Returns ``(ok, detail, fix)``: 2xx passes; 401/403 fails (the provider
     issued a credential the API rejects — broken account or wrong adapter);
     any other status is inconclusive and passes with a warning detail, since
     verify_path is an optional accelerator, not a gate on the route existing.
     """
     import httpx
+    from urllib.parse import urljoin
 
-    url = target_url.rstrip("/") + verify_path
+    url = urljoin(target_url.rstrip("/") + "/", verify_path)
     try:
         # Redirects are deliberately NOT followed: middleware that rejects a
         # bad credential with 302 -> /login -> 200 would otherwise read as a

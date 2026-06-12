@@ -386,6 +386,74 @@ def test_error_body_echoing_password_is_scrubbed(tmp_path, monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
+# Project-URL host gate — the service-role key must never be sent to an
+# arbitrary host (typo / attacker-supplied SUPABASE_PROJECT_URL).
+# ---------------------------------------------------------------------------
+
+def _host_gate_env(tmp_path, monkeypatch, url: str) -> Path:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        f"SUPABASE_PROJECT_URL={url}\n"
+        f"SUPABASE_SERVICE_ROLE_KEY={SERVICE_KEY}\n",
+        encoding="utf-8",
+    )
+    for key in ("SUPABASE_PROJECT_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_ACCESS_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+    return env_file
+
+
+def test_non_supabase_host_is_refused_before_any_request(tmp_path, monkeypatch, capsys):
+    env_file = _host_gate_env(tmp_path, monkeypatch, "https://evil.example.com")
+
+    def _no_network(request):
+        raise AssertionError("the service-role key must not be sent to an unrecognized host")
+
+    with httpx.Client(transport=httpx.MockTransport(_no_network)) as client:
+        rc = pa.main(["--env-file", str(env_file)], http=client)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "Refusing to send the service-role key" in err
+    assert "--allow-custom-domain" in err
+    assert SERVICE_KEY not in err
+
+
+def test_cleanup_also_refuses_non_supabase_host(tmp_path, monkeypatch, capsys):
+    env_file = _host_gate_env(tmp_path, monkeypatch, "https://evil.example.com")
+    env_file.write_text(
+        env_file.read_text(encoding="utf-8") + "PENTEST_USER_A_ID=uid-a\n", encoding="utf-8"
+    )
+
+    def _no_network(request):
+        raise AssertionError("cleanup must not send the key to an unrecognized host")
+
+    with httpx.Client(transport=httpx.MockTransport(_no_network)) as client:
+        rc = pa.main(["--cleanup", "--env-file", str(env_file)], http=client)
+    assert rc == 1
+    assert "Refusing to send the service-role key" in capsys.readouterr().err
+
+
+def test_allow_custom_domain_opt_in_permits_other_hosts(tmp_path, monkeypatch):
+    env_file = _host_gate_env(tmp_path, monkeypatch, "https://supabase.selfhosted.example")
+    stub = _AdminStub()
+    with httpx.Client(transport=httpx.MockTransport(stub.handler)) as client:
+        rc = pa.main(["--env-file", str(env_file), "--allow-custom-domain"], http=client)
+    assert rc == 0
+    assert len(stub.users) == 2
+
+
+def test_rx_supabase_host_gate_vectors():
+    # [RX-TEST] match/no-match vectors for the host gate.
+    assert pa._SUPABASE_HOST_RE.match("https://abcdefghijklmnopqrst.supabase.co")
+    assert pa._SUPABASE_HOST_RE.match("https://my-branch-ref.supabase.co")
+    assert not pa._SUPABASE_HOST_RE.match("https://ref.supabase.co.evil.com")   # suffix attack
+    assert not pa._SUPABASE_HOST_RE.match("https://evil.com/ref.supabase.co")   # path trick
+    assert not pa._SUPABASE_HOST_RE.match("https://ref.supabase.co:8443")       # port
+    assert not pa._SUPABASE_HOST_RE.match("https://sub.ref.supabase.co")        # extra label
+    assert not pa._SUPABASE_HOST_RE.match("http://ref.supabase.co")             # scheme
+    assert not pa._SUPABASE_HOST_RE.match("https://evil-supabase.co")           # lookalike
+
+
+# ---------------------------------------------------------------------------
 # update_env_file unit behavior
 # ---------------------------------------------------------------------------
 

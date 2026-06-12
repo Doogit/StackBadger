@@ -188,6 +188,37 @@ def test_doctor_verify_path_network_error_fails(monkeypatch):
     assert "request failed" in results[0].detail
 
 
+def test_verify_path_resolves_against_origin_for_subpath_deployments(monkeypatch):
+    # verify_path is ROOT-relative: a base URL carrying a path prefix
+    # (https://example.com/app) must NOT leak into the probe URL — naive
+    # concatenation would request /app/api/me and fail the preflight falsely.
+    captured = {}
+
+    def _get(url, **kw):
+        captured["url"] = url
+        return httpx.Response(200, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", _get)
+    ok, detail, _ = doctor._check_verify_path(
+        "https://example.com/app", "/api/me", {"Authorization": "Bearer x"}, "User A"
+    )
+    assert ok
+    assert captured["url"] == "https://example.com/api/me"
+
+
+def test_verify_path_join_without_prefix_unchanged(monkeypatch):
+    captured = {}
+
+    def _get(url, **kw):
+        captured["url"] = url
+        return httpx.Response(200, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", _get)
+    ok, _, _ = doctor._check_verify_path("https://example.com/", "/api/me", {}, "User A")
+    assert ok
+    assert captured["url"] == "https://example.com/api/me"
+
+
 def test_doctor_verify_path_does_not_follow_redirects(monkeypatch):
     # A 302 -> login -> 200 chain must NOT read as a pass: redirects are not
     # followed and 3xx is inconclusive (with an explanatory detail), never OK.

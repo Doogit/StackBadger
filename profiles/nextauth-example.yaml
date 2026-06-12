@@ -67,6 +67,8 @@ test_accounts:
 # stack.auth adapter or a dead account instead of 50 skipped tests later.
 # Do NOT point it at an app PAGE: CDN-cached pages return 200 to anonymous
 # callers and check auth client-side, which verifies nothing. Unset (the
-# default) -> the check is skipped with a warning (black-box safe).
+# default) -> the check is skipped with a warning (black-box safe). The path
+# is ROOT-relative: it resolves against the target ORIGIN (any path prefix
+# on base_url is ignored).
 # auth:
 #   verify_path: /api/user/profile
