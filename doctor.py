@@ -41,6 +41,15 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+# doctor.py is a standalone tool runnable from any cwd (e.g.
+# `python path/to/doctor.py ...`). Default the .env / .env.example lookups to
+# the repo the script lives in, NOT the caller's cwd, so a standalone run finds
+# the repo's credentials instead of failing env-complete spuriously. Explicit
+# --env-file / --env-example still override.
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_DEFAULT_ENV_FILE = _SCRIPT_DIR / ".env"
+_DEFAULT_ENV_EXAMPLE = _SCRIPT_DIR / ".env.example"
+
 EXIT_OK = 0
 EXIT_PYTHON_VERSION = 10
 EXIT_ENV_INCOMPLETE = 11
@@ -219,8 +228,8 @@ def run_doctor(
     target_url: str,
     profile_path: str | None = None,
     *,
-    env_file: Path = Path(".env"),
-    env_example: Path = Path(".env.example"),
+    env_file: Path = _DEFAULT_ENV_FILE,
+    env_example: Path = _DEFAULT_ENV_EXAMPLE,
     environ: dict[str, str] | None = None,
 ) -> tuple[int, list[CheckResult]]:
     """Run all checks in order, halting at the first failure."""
@@ -273,8 +282,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("target_url", help="Target site URL, e.g. https://staging.example.com")
     parser.add_argument("--profile", default=None, help="Optional YAML profile (names stack.auth etc.)")
     parser.add_argument("--json", action="store_true", help="Emit a machine-readable JSON summary to stdout")
-    parser.add_argument("--env-file", default=".env", help=argparse.SUPPRESS)
-    parser.add_argument("--env-example", default=".env.example", help=argparse.SUPPRESS)
+    parser.add_argument("--env-file", default=str(_DEFAULT_ENV_FILE), help=argparse.SUPPRESS)
+    parser.add_argument("--env-example", default=str(_DEFAULT_ENV_EXAMPLE), help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     try:

@@ -62,6 +62,21 @@ def test_no_subdomain_cross_match(sandbox):
     assert "api.stub.invalid" in result.stderr
 
 
+def test_gate_uses_cli_host_not_a_different_confirm_value(sandbox):
+    # The contract is the CLI host: confirming a DIFFERENT host (e.g. the www
+    # form of an apex you passed) is refused, and the refusal names the CLI host
+    # the operator must confirm. This pins the "CLI host, not post-redirect host"
+    # contract so the documented guidance and the code cannot drift apart.
+    result = run_sh(
+        sandbox,
+        ["https://stub.invalid"],
+        env_overrides={"CONFIRM_TARGET": "www.stub.invalid", "CONFIRM_AUTHORIZED": "www.stub.invalid"},
+    )
+    assert result.returncode == 10
+    assert "CONFIRM_TARGET gate refused" in result.stderr
+    assert f"export CONFIRM_TARGET={HOST}" in result.stderr  # names the CLI host
+
+
 def test_scheme_case_port_insensitive_match_proceeds(sandbox):
     stub_doctor(sandbox, 0)
     result = run_sh(

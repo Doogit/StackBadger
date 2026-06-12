@@ -28,7 +28,8 @@ Authorization is **machine-enforced**, not just a checkbox: `run.sh` refuses to
 scan any non-localhost host (read-only mode included) unless both
 `CONFIRM_TARGET=<host>` ("this is the right host") and
 `CONFIRM_AUTHORIZED=<host>` ("a human affirmed authorization") exact-match the
-target's host. `CONFIRM_AUTHORIZED` must be set by the site owner out-of-band —
+host of the URL you pass to `run.sh` (the CLI host, not a post-redirect host).
+`CONFIRM_AUTHORIZED` must be set by the site owner out-of-band —
 an AI agent running the harness must never set it for itself — and `--yes` does
 not bypass either gate. See `.env.example` for the exact format.
 

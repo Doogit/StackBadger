@@ -37,9 +37,11 @@ variables yourself, and do not proceed until the user confirms they have set the
 > export CONFIRM_AUTHORIZED=<target host>   # affirms you own / are authorized in writing to test it
 > ```
 >
-> No subdomain cross-match (`api.example.com` != `example.com`). For a site that
-> redirects (apex -> www), use the post-redirect canonical host. Only do this for
-> systems you own or are explicitly authorized, in writing, to test.
+> No subdomain cross-match (`api.example.com` != `example.com`). Use the host of
+> the URL you pass to `run.sh` — not a post-redirect host. If the site redirects
+> apex -> www and you want to test www, pass the www URL and confirm
+> `www.example.com`. Only do this for systems you own or are explicitly
+> authorized, in writing, to test.
 
 If `run.sh` later refuses with a `CONFIRM_TARGET` / `CONFIRM_AUTHORIZED` gate
 error, relay the message to the user and wait — never set the variables yourself.

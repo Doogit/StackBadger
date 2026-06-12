@@ -87,6 +87,33 @@ def test_required_keys_fall_back_when_example_missing(tmp_path):
     assert set(keys) == set(ALL_CREDS)
 
 
+def test_default_env_paths_resolve_to_script_dir_not_cwd():
+    # Standalone use (`python path/to/doctor.py` from any cwd) must look for
+    # .env / .env.example next to the script, not in the caller's cwd.
+    assert doctor._DEFAULT_ENV_FILE == doctor._SCRIPT_DIR / ".env"
+    assert doctor._DEFAULT_ENV_EXAMPLE == doctor._SCRIPT_DIR / ".env.example"
+    assert doctor._DEFAULT_ENV_FILE.is_absolute()
+
+
+def test_main_uses_script_dir_env_defaults_from_foreign_cwd(tmp_path, monkeypatch):
+    # Invoke main() from an unrelated cwd with no args overriding env paths;
+    # the env_file/env_example handed to run_doctor must be the script-dir
+    # defaults (absolute), not tmp_path/.env.
+    monkeypatch.chdir(tmp_path)
+    captured = {}
+
+    def _capture(target_url, profile, *, env_file, env_example):
+        captured["env_file"] = env_file
+        captured["env_example"] = env_example
+        return doctor.EXIT_OK, []
+
+    monkeypatch.setattr(doctor, "run_doctor", _capture)
+    doctor.main([TARGET])
+    assert captured["env_file"] == doctor._DEFAULT_ENV_FILE
+    assert captured["env_example"] == doctor._DEFAULT_ENV_EXAMPLE
+    assert Path(captured["env_file"]).is_absolute()
+
+
 def test_load_dotenv_does_not_override_existing_env(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text(

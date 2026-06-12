@@ -228,9 +228,15 @@ trap _cleanup_on_exit EXIT INT TERM
 #   CONFIRM_TARGET     — "this is the right host" (typo/wrong-env guard)
 #   CONFIRM_AUTHORIZED — "a human affirmed authorization to test this host"
 #
-# Each must EXACT-match the resolved target host (scheme/case/port-insensitive,
-# NO subdomain cross-match: api.example.com != example.com). For sites that
-# redirect (e.g. apex -> www), set the post-redirect canonical host. The values
+# Each must EXACT-match the host of the URL you pass to run.sh
+# (scheme/case/port-insensitive, NO subdomain cross-match:
+# api.example.com != example.com). The gate compares the CLI host, NOT a
+# post-redirect host: the gate runs before any network contact (so it cannot,
+# and must not, resolve a redirect against an unconfirmed/unauthorized host),
+# and the probe traffic's origin of record is the CLI host anyway
+# (assemble_profile pins target.base_url to the CLI arg). So if your site
+# redirects apex -> www and you want to test the www host, pass the www URL
+# (./run.sh https://www.example.com) and confirm www.example.com. The values
 # are meant to be set by the HUMAN out-of-band — an agent following LAUNCH.md
 # must not set CONFIRM_AUTHORIZED for itself. --yes (AUTO_YES) does NOT bypass
 # either gate. localhost / 127.0.0.1 / [::1] are exempt. Placed before the
