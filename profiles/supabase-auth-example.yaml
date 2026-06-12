@@ -66,3 +66,17 @@ test_accounts:
 # PostgREST/IDOR table enumeration. Exact-name, case-insensitive.
 # exclude_tables:
 #   - dangerous_audit_table
+
+# --- Auth verify_path (optional fast-fail) ---
+# An API-LAYER route that returns 401/403 to unauthenticated callers and 2xx
+# to a signed-in account (a PostgREST table read, an auth-checked function or
+# API route). After sign-in, run.sh and doctor.py request it with EACH
+# account's credential and abort on 401/403 — failing fast on a wrong
+# stack.auth adapter or a dead account instead of 50 skipped tests later.
+# Do NOT point it at an app PAGE: CDN-cached pages return 200 to anonymous
+# callers and check auth client-side, which verifies nothing. Unset (the
+# default) -> the check is skipped with a warning (black-box safe). The path
+# is ROOT-relative: it resolves against the target ORIGIN (any path prefix
+# on base_url is ignored).
+# auth:
+#   verify_path: /api/user/profile

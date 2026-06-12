@@ -546,6 +546,57 @@ if not headers:
 info "Sign-in OK — user_b authenticated."
 
 # ---------------------------------------------------------------------------
+# Auth verify_path fast-fail (optional, profile-driven)
+# ---------------------------------------------------------------------------
+# When the profile declares auth.verify_path — an API-LAYER route that returns
+# 401/403 to unauthenticated callers (PostgREST endpoint / auth-checked
+# function), NOT a CDN-cached page that 200s anonymously — request it with
+# EACH account's credential now. A 401/403 here means the provider issued a
+# token the target API rejects: a broken account or, more often, the WRONG
+# stack.auth adapter. Failing now beats discovering it as 50 skipped tests
+# later. Unset -> warn + skip (black-box safe). Exits 10 (preflight), never
+# aggregate's 0/1/2/3.
+info "Checking auth.verify_path (if set)..."
+# The status-interpretation logic (2xx / 401-403 / 3xx-no-follow /
+# inconclusive) lives in doctor._check_verify_path — ONE source of truth for
+# both the doctor preflight and this pre-scan check; only the per-account
+# loop and adapter plumbing live here.
+"$PYTHON_BIN" -c "
+import sys, os
+sys.path.insert(0, '.')
+from profile import load_profile
+from auth import create_adapter
+from doctor import _check_verify_path
+
+profile = load_profile(os.environ['PENTEST_PROFILE'])
+verify_path = (profile.auth and profile.auth.verify_path) or ''
+if not verify_path:
+    print('[verify-path] auth.verify_path not set — skipping the pre-scan auth verification (black-box mode).', file=sys.stderr)
+    raise SystemExit(0)
+base_url = os.environ.get('TARGET_BASE_URL') or (profile.target and profile.target.base_url) or ''
+adapter = create_adapter(profile)
+failures = []
+try:
+    for account, who in (('user_a', 'User A'), ('user_b', 'User B')):
+        try:
+            headers = adapter.get_headers(account)
+        except Exception as exc:
+            failures.append(f'{account}: sign-in failed while fetching headers for the verify_path check: {exc}')
+            continue
+        ok, detail, fix = _check_verify_path(base_url, verify_path, headers, who)
+        if ok:
+            print(f'[verify-path] {account}: {detail}', file=sys.stderr)
+        else:
+            failures.append(f'{account}: {detail}. Fix: {fix}')
+finally:
+    if hasattr(adapter, 'close'):
+        adapter.close()
+for f in failures:
+    print('[verify-path] FAIL ' + f, file=sys.stderr)
+raise SystemExit(1 if failures else 0)
+" || fail_preflight "auth.verify_path check failed — see the [verify-path] FAIL lines above."
+
+# ---------------------------------------------------------------------------
 # Pre-flight: Key endpoint spot-check
 # ---------------------------------------------------------------------------
 info "Spot-checking key endpoints..."

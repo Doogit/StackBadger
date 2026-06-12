@@ -12,6 +12,7 @@ Dependencies: stdlib only + pyyaml (already in pyproject.toml dependencies).
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 import warnings
@@ -157,6 +158,247 @@ def detect_stack(root: Path) -> dict[str, str]:
         stack["payments"] = "stripe"
 
     return stack
+
+
+# ---------------------------------------------------------------------------
+# Step 1b: Auth-provider detection (source-scan accelerator)
+# ---------------------------------------------------------------------------
+# Why this exists: a deployed-bundle scan cannot distinguish Supabase-Auth
+# from Clerk-auth-on-Supabase-DB (supabase-js statically bundles GoTrue even
+# for database-only use — supabase-js#151), so black-box discovery defaults
+# auth away from supabase-auth. Source CAN resolve it: dependency presence is
+# deterministic, and active-usage signals separate "uses the auth product"
+# from "uses the same vendor's database". This is an opt-in accelerator —
+# black-box bundle discovery stays the zero-config default.
+
+# Auth-capable libraries and how to spot them in package.json dependencies.
+# "dedicated" libs exist only to do auth — presence alone is auth intent.
+# "dual-purpose" libs (Supabase, Firebase) also serve DB/storage roles, so
+# presence alone is NOT auth intent; active usage must corroborate.
+_AUTH_DEP_PATTERNS: dict[str, tuple[re.Pattern, bool]] = {
+    # provider -> (dependency-name regex, dedicated_auth_lib)
+    "clerk": (re.compile(r"^@clerk/"), True),
+    "nextauth": (re.compile(r"^(next-auth|@auth/)"), True),
+    "supabase-auth": (re.compile(r"^@supabase/(supabase-js|ssr|auth-helpers)"), False),
+    "firebase": (re.compile(r"^(firebase|firebase-admin)$"), False),
+}
+
+# Active-usage signals per provider, run over .js/.ts/.mjs source. The
+# Supabase patterns deliberately target the auth product (GoTrue calls and
+# @supabase/ssr session plumbing), not generic client construction — a
+# Clerk + Supabase-DB repo creates Supabase clients but never calls
+# supabase.auth.* or mints sessions in middleware.
+_AUTH_USAGE_PATTERNS: dict[str, str] = {
+    "clerk": r"""from\s+['"]@clerk/|require\(['"]@clerk/|clerkMiddleware\s*\(|<ClerkProvider""",
+    "nextauth": r"""from\s+['"]next-auth|from\s+['"]@auth/|NextAuth\s*\(|getServerSession\s*\(""",
+    "supabase-auth": (
+        r"\.auth\.(signInWithPassword|signInWithOtp|signInWithOAuth|signUp|"
+        r"getUser|getSession|onAuthStateChange|exchangeCodeForSession|setSession|"
+        r"verifyOtp|admin)\b"
+        r"""|from\s+['"]@supabase/ssr['"]"""
+        r"|createServerClient\s*\(|createBrowserClient\s*\(|createMiddlewareClient\s*\("
+    ),
+    "firebase": (
+        r"""from\s+['"]firebase/auth['"]"""
+        r"|getAuth\s*\(|signInWithEmailAndPassword\s*\(|onAuthStateChanged\s*\("
+    ),
+}
+
+# Provider keywords for the CLAUDE.md / AGENTS.md prose layer.
+_AUTH_PROSE_PATTERNS: dict[str, str] = {
+    "clerk": r"\bclerk\b",
+    "nextauth": r"\bnext-?auth\b|\bauth\.js\b",
+    "supabase-auth": r"\bsupabase[ -]auth\b|\bgotrue\b",
+    "firebase": r"\bfirebase[ -]auth\b",
+}
+
+
+def _auth_deps_present(root: Path) -> dict[str, str]:
+    """Return {provider: evidence} for auth-capable deps in any package.json."""
+    found: dict[str, str] = {}
+    for f in _walk_files(root):
+        if f.name != "package.json":
+            continue
+        try:
+            pkg = json.loads(_read_text(f))
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(pkg, dict):
+            continue
+        dep_names: list[str] = []
+        for section in ("dependencies", "devDependencies", "peerDependencies"):
+            block = pkg.get(section)
+            if isinstance(block, dict):
+                dep_names.extend(block.keys())
+        rel = str(f.relative_to(root)).replace("\\", "/")
+        for provider, (pattern, _dedicated) in _AUTH_DEP_PATTERNS.items():
+            if provider in found:
+                continue
+            for name in dep_names:
+                if pattern.match(name):
+                    found[provider] = f"dependency '{name}' in {rel}"
+                    break
+    return found
+
+
+def _auth_usage_evidence(
+    root: Path, max_files: int = 2000
+) -> tuple[dict[str, list[str]], bool]:
+    """Return ({provider: [evidence lines]}, scan_truncated) for active auth usage.
+
+    ``scan_truncated`` is True when the repo has more candidate source files
+    than the grep budget — absence of usage evidence is then NOT evidence of
+    absence, and the caller must not demote a dual-purpose library to
+    "database-only" on that basis.
+    """
+    _USAGE_EXTS = {".js", ".ts", ".mjs", ".jsx", ".tsx"}
+    candidate_count = sum(1 for f in _walk_files(root) if f.suffix in _USAGE_EXTS)
+    truncated = candidate_count > max_files
+
+    usage: dict[str, list[str]] = {}
+    for provider, pattern in _AUTH_USAGE_PATTERNS.items():
+        hits = _grep_files(root, pattern, "**/*.{js,ts,mjs,jsx,tsx}", max_files=max_files)
+        lines: list[str] = []
+        for path, line in hits[:3]:  # a few concrete examples beat a flood
+            try:
+                rel = str(path.relative_to(root)).replace("\\", "/")
+            except ValueError:
+                rel = path.name
+            marker = " [middleware]" if path.stem == "middleware" else ""
+            lines.append(f"{rel}{marker}: {line[:120]}")
+        if lines:
+            if len(hits) > 3:
+                lines.append(f"(+{len(hits) - 3} more matches)")
+            usage[provider] = lines
+    return usage, truncated
+
+
+def _auth_prose_claims(root: Path) -> dict[str, str]:
+    """Read the target's CLAUDE.md / AGENTS.md for auth-provider claims.
+
+    Corroboration ONLY — prose never overrides what the code shows. Returns
+    {provider: evidence line}.
+    """
+    claims: dict[str, str] = {}
+    for name in ("CLAUDE.md", "AGENTS.md", ".claude/CLAUDE.md"):
+        doc = root / name
+        if not doc.is_file():
+            continue
+        for line in _read_text(doc).splitlines():
+            lowered = line.lower()
+            if "auth" not in lowered:
+                continue
+            for provider, pattern in _AUTH_PROSE_PATTERNS.items():
+                if provider not in claims and re.search(pattern, lowered):
+                    claims[provider] = f"{name}: {line.strip()[:120]}"
+    return claims
+
+
+def detect_auth_provider(root: Path, max_usage_files: int = 2000) -> dict[str, Any]:
+    """Detect the project's ACTIVE auth provider from source, with a verdict.
+
+    Layered signals, strongest first:
+      1. Dependency presence (package.json) — deterministic for *presence*.
+      2. Active usage — `supabase.auth.*` / `@supabase/ssr` session plumbing
+         vs `@clerk/*` imports etc. Separates the auth product from a
+         dual-purpose vendor's DB/storage use.
+      3. `CLAUDE.md` / `AGENTS.md` prose — corroboration only; on conflict
+         the code wins and the conflict is surfaced as evidence.
+
+    Returns ``{"provider": str | None, "confidence": "high" | "ambiguous" |
+    "none", "evidence": list[str]}``. ``provider`` uses ``stack.auth`` values
+    (``clerk`` / ``firebase`` / ``nextauth`` / ``supabase-auth``). One
+    candidate -> ``high``; two or more -> ``ambiguous`` (the caller MUST
+    confirm with a human — never silently pick); none -> ``none``.
+    """
+    deps = _auth_deps_present(root)
+    usage, scan_truncated = _auth_usage_evidence(root, max_files=max_usage_files)
+    prose = _auth_prose_claims(root)
+
+    evidence: list[str] = []
+    candidates: list[str] = []
+    if scan_truncated:
+        evidence.append(
+            f"usage scan TRUNCATED (more than {max_usage_files} source files) — "
+            "absence of usage evidence is not evidence of absence"
+        )
+    for provider, dep_evidence in deps.items():
+        dedicated = _AUTH_DEP_PATTERNS[provider][1]
+        used = provider in usage
+        if dedicated or used:
+            candidates.append(provider)
+            evidence.append(f"{provider}: {dep_evidence}")
+            for line in usage.get(provider, []):
+                evidence.append(f"{provider} usage: {line}")
+        elif len(deps) == 1:
+            # Sole auth-capable lib in the repo: nothing else could be doing
+            # auth, so a dual-purpose lib counts even without usage hits.
+            candidates.append(provider)
+            evidence.append(
+                f"{provider}: {dep_evidence} (sole auth-capable library; no "
+                "auth API usage detected)"
+            )
+        elif scan_truncated:
+            # A truncated scan may simply not have REACHED this library's
+            # auth calls. Demoting it to "database-only" here could flip an
+            # honest ambiguous verdict into a confident wrong pick, so keep
+            # it as a candidate and let the confirm step decide.
+            candidates.append(provider)
+            evidence.append(
+                f"{provider}: {dep_evidence} — no auth API usage found, but "
+                "the usage scan was truncated; kept as a candidate"
+            )
+        else:
+            evidence.append(
+                f"{provider}: {dep_evidence} — no auth API usage found; "
+                "treated as database/storage use only"
+            )
+
+    if not candidates:
+        provider, confidence = None, "none"
+        evidence.append("no auth-capable library detected in package.json")
+    elif len(candidates) == 1:
+        provider, confidence = candidates[0], "high"
+    else:
+        provider, confidence = None, "ambiguous"
+        evidence.append(
+            "AMBIGUOUS: multiple active auth candidates "
+            f"({', '.join(sorted(candidates))}) — confirm with the site owner "
+            "before picking stack.auth"
+        )
+
+    # Layer 3: prose. Never changes the pick; corroborates or flags conflict.
+    for claimed, line in prose.items():
+        if claimed == provider:
+            evidence.append(f"corroborated by {line}")
+        elif provider is not None:
+            evidence.append(
+                f"CONFLICT: prose claims '{claimed}' ({line}) but code "
+                f"evidence says '{provider}' — code wins"
+            )
+        else:
+            evidence.append(f"prose mentions '{claimed}' ({line})")
+
+    return {"provider": provider, "confidence": confidence, "evidence": evidence}
+
+
+def _report_auth_verdict(verdict: dict[str, Any]) -> None:
+    """Print the detection verdict to stderr (human lines + one JSON line)."""
+    print(
+        f"[detect-auth] provider={verdict['provider'] or '<none>'} "
+        f"confidence={verdict['confidence']}",
+        file=sys.stderr,
+    )
+    for line in verdict["evidence"]:
+        print(f"[detect-auth]   {line}", file=sys.stderr)
+    if verdict["confidence"] == "ambiguous":
+        print(
+            "[detect-auth] stack.auth was NOT set — review the evidence above, "
+            "confirm the active provider with the site owner, and set "
+            "stack.auth in the profile explicitly.",
+            file=sys.stderr,
+        )
+    print(f"[detect-auth-json] {json.dumps(verdict)}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +679,28 @@ def detect_features(root: Path) -> dict[str, Any]:
 def assemble_profile(root: Path) -> dict[str, Any]:
     """Run all discovery steps and return a complete profile dict."""
     stack = detect_stack(root)
+
+    # Auth provider: detect_stack's dependency regexes can only see library
+    # PRESENCE (and never emit supabase-auth at all). detect_auth_provider
+    # layers deps -> active usage -> CLAUDE.md/AGENTS.md and is authoritative
+    # here. High confidence sets stack.auth; ambiguity refuses to pick and
+    # leaves a loud CONFIRM placeholder instead of silently defaulting.
+    auth_verdict = detect_auth_provider(root)
+    _report_auth_verdict(auth_verdict)
+    if auth_verdict["confidence"] == "high":
+        stack["auth"] = auth_verdict["provider"]
+    elif auth_verdict["confidence"] == "ambiguous":
+        stack["auth"] = (
+            "CONFIRM  # TODO: ambiguous — multiple active auth libraries "
+            "detected; see the [detect-auth] evidence and set explicitly"
+        )
+    else:
+        # No auth-capable dependency found. detect_stack's loose substring
+        # regex can still have set auth='clerk' (e.g. any package name
+        # containing "clerk"); leaving it would emit a profile that
+        # contradicts the printed verdict — the silent default U4 removes.
+        stack.pop("auth", None)
+
     endpoints = discover_endpoints(root, stack)
     sfm = build_source_file_map(root, endpoints, stack)
 

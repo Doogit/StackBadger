@@ -14,6 +14,12 @@ first failure:
     4. user-a-login      User A authenticates via the profile's auth adapter
     5. user-b-login      User B authenticates via the same adapter
 
+When the profile declares ``auth.verify_path`` (an API-layer route that 401s
+unauthenticated callers), checks 4 and 5 additionally request it with the
+acquired credential and fail on 401/403 — catching a wrong ``stack.auth``
+adapter that a bare provider sign-in cannot. Unset -> the login checks run
+without it (black-box safe).
+
 doctor is read-only: it signs in the two test accounts and fetches the
 target's public pages/bundles (profile assembly), nothing else. It does NOT
 probe IDOR or send any attack traffic.
@@ -76,8 +82,12 @@ class CheckResult:
     exit_code: int = EXIT_OK
 
 
-def _parse_env_file(path: Path) -> dict[str, str]:
-    """Parse simple KEY=VALUE lines; ignores comments and blank lines."""
+def parse_env_file(path: Path) -> dict[str, str]:
+    """Parse simple KEY=VALUE lines; ignores comments and blank lines.
+
+    Shared with provision_accounts.py (imported there) so .env parsing
+    semantics cannot drift between the preflight and provisioning scripts.
+    """
     values: dict[str, str] = {}
     if not path.is_file():
         return values
@@ -98,7 +108,7 @@ def load_dotenv(env_file: Path, environ: dict[str, str]) -> None:
     Existing environment values win — mirroring shell ``source`` order, where
     the caller's explicit exports were applied last.
     """
-    for key, value in _parse_env_file(env_file).items():
+    for key, value in parse_env_file(env_file).items():
         if key not in environ or not environ[key]:
             environ[key] = value
 
@@ -110,7 +120,7 @@ def required_env_keys(env_example: Path) -> tuple[str, ...]:
     ones (optional vars are shipped commented out). Falls back to the four
     PENTEST_USER_* keys when the file is absent.
     """
-    keys = tuple(_parse_env_file(env_example).keys())
+    keys = tuple(parse_env_file(env_example).keys())
     return keys or _FALLBACK_REQUIRED_KEYS
 
 
@@ -163,20 +173,89 @@ def check_target_reachable(target_url: str) -> CheckResult:
 
 
 def _build_adapter(target_url: str, profile_path: str | None):
-    """Assemble the runtime profile (one live crawl) and build its auth adapter."""
+    """Assemble the runtime profile (one live crawl) and build its auth adapter.
+
+    Returns ``(adapter, provider, verify_path)`` — *verify_path* is the
+    profile's optional ``auth.verify_path`` (None when unset).
+    """
     from auth import create_adapter
     from profile_assembler import assemble_profile
 
     profile = assemble_profile(target_url, yaml_path=profile_path)
     provider = (profile.stack and profile.stack.auth) or "unknown"
-    return create_adapter(profile), provider
+    verify_path = (profile.auth and profile.auth.verify_path) or None
+    return create_adapter(profile), provider, verify_path
+
+
+def _check_verify_path(target_url: str, verify_path: str, headers: dict, who: str):
+    """Request the profile's auth.verify_path with one account's headers.
+
+    ``verify_path`` is ROOT-relative: it resolves against the ORIGIN of
+    *target_url*, not against any path prefix the target URL carries. For
+    ``https://example.com/app`` + ``/api/me`` the probe goes to
+    ``https://example.com/api/me`` (urljoin semantics for a leading-slash
+    path), never ``.../app/api/me``.
+
+    Returns ``(ok, detail, fix)``: 2xx passes; 401/403 fails (the provider
+    issued a credential the API rejects — broken account or wrong adapter);
+    any other status is inconclusive and passes with a warning detail, since
+    verify_path is an optional accelerator, not a gate on the route existing.
+    """
+    import httpx
+    from urllib.parse import urljoin
+
+    url = urljoin(target_url.rstrip("/") + "/", verify_path)
+    try:
+        # Redirects are deliberately NOT followed: middleware that rejects a
+        # bad credential with 302 -> /login -> 200 would otherwise read as a
+        # 2xx "pass" for exactly the wrong-adapter condition this check
+        # exists to catch.
+        resp = httpx.get(url, headers=headers, timeout=15.0, follow_redirects=False)
+    except httpx.HTTPError as exc:
+        return (
+            False,
+            f"{who}: verify_path {verify_path} request failed: "
+            f"{exc.__class__.__name__}: {exc}",
+            "check the URL/network; if verify_path is wrong, fix auth.verify_path in the profile",
+        )
+    if 200 <= resp.status_code < 300:
+        return True, f"verify_path {verify_path} -> HTTP {resp.status_code}", ""
+    if resp.status_code in (401, 403):
+        return (
+            False,
+            f"{who} signed in, but {verify_path} returned HTTP {resp.status_code}",
+            f"the provider issued a credential the API rejects — either the "
+            f"{who} account is broken in the target app, or stack.auth selects "
+            "the wrong adapter (token from the wrong issuer; see LAUNCH.md Step 0)",
+        )
+    if 300 <= resp.status_code < 400:
+        return (
+            True,
+            f"verify_path {verify_path} -> HTTP {resp.status_code} redirect "
+            "(inconclusive — redirects are not followed; a redirect-to-login is "
+            "indistinguishable from rejection. Point auth.verify_path at a "
+            "direct API route that answers 2xx/401 itself)",
+            "",
+        )
+    return (
+        True,
+        f"verify_path {verify_path} -> HTTP {resp.status_code} (inconclusive — "
+        "expected 2xx; is it an API-layer route?)",
+        "",
+    )
 
 
 def check_logins(target_url: str, profile_path: str | None) -> list[CheckResult]:
-    """Sign in user_a then user_b via the profile-driven adapter."""
+    """Sign in user_a then user_b via the profile-driven adapter.
+
+    When the profile declares ``auth.verify_path``, each account's login check
+    additionally requests that route with the acquired credential — catching a
+    wrong adapter (sign-in succeeds against the provider, but the target API
+    rejects the token) that a bare sign-in cannot.
+    """
     results: list[CheckResult] = []
     try:
-        adapter, provider = _build_adapter(target_url, profile_path)
+        adapter, provider, verify_path = _build_adapter(target_url, profile_path)
     except Exception as exc:
         results.append(CheckResult(
             "user-a-login",
@@ -194,12 +273,12 @@ def check_logins(target_url: str, profile_path: str | None) -> list[CheckResult]
             ("user_a", "user-a-login", EXIT_USER_A_LOGIN),
             ("user_b", "user-b-login", EXIT_USER_B_LOGIN),
         ):
+            who = "User A" if account == "user_a" else "User B"
             try:
                 headers = adapter.get_headers(account)
                 if not headers:
                     raise RuntimeError("adapter returned no auth headers")
             except Exception as exc:
-                who = "User A" if account == "user_a" else "User B"
                 results.append(CheckResult(
                     check_name,
                     False,
@@ -210,7 +289,18 @@ def check_logins(target_url: str, profile_path: str | None) -> list[CheckResult]
                     exit_code=exit_code,
                 ))
                 return results
-            results.append(CheckResult(check_name, True, f"{account} authenticated via '{provider}' adapter"))
+            detail = f"{account} authenticated via '{provider}' adapter"
+            if verify_path:
+                ok, vp_detail, vp_fix = _check_verify_path(
+                    target_url, verify_path, headers, who
+                )
+                if not ok:
+                    results.append(CheckResult(
+                        check_name, False, vp_detail, fix=vp_fix, exit_code=exit_code,
+                    ))
+                    return results
+                detail += f"; {vp_detail}"
+            results.append(CheckResult(check_name, True, detail))
     finally:
         if hasattr(adapter, "close"):
             try:

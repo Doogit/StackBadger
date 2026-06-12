@@ -202,6 +202,23 @@ def load_profile(path: str | Path) -> Profile:
                 f"got {type(_excl_val).__name__}"
             )
 
+    # Validate the optional auth block: auth.verify_path must be a root-relative
+    # path string when present (None is fine — the assembler injects a null
+    # default into frozen runtime profiles).
+    auth_block = data.get("auth")
+    if auth_block is not None:
+        if not isinstance(auth_block, dict):
+            raise ValueError(
+                f"Profile field 'auth' must be a mapping, got {type(auth_block).__name__}"
+            )
+        verify_path = auth_block.get("verify_path")
+        if verify_path is not None:
+            if not isinstance(verify_path, str) or not verify_path.startswith("/"):
+                raise ValueError(
+                    "Profile field 'auth.verify_path' must be a string path "
+                    f"starting with '/', got {verify_path!r}"
+                )
+
     # Warn if source_file_map references endpoints not declared in the profile.
     import warnings as _warnings
 

@@ -223,6 +223,15 @@ def assemble_profile(
     data["exclude_paths"] = effective_exclude_paths(data.get("exclude_paths"))
     data["exclude_tables"] = effective_exclude_tables(data.get("exclude_tables"))
 
+    # auth.verify_path: optional fast-fail route, carried verbatim from the
+    # YAML layer with a null default. NEVER inferred — a guessed path that
+    # 200s anonymously (e.g. a CDN-cached page) would fake a passing check.
+    auth_block = data.get("auth")
+    if not isinstance(auth_block, dict):
+        data["auth"] = {"verify_path": None}
+    else:
+        auth_block.setdefault("verify_path", None)
+
     # Validate minimum required fields.
     target = data.get("target")
     if not isinstance(target, dict) or not target.get("base_url"):
