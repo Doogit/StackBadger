@@ -557,6 +557,57 @@ def test_cleanup_without_config_and_nothing_recorded_is_friendly_noop(tmp_path, 
     assert "nothing recorded" in capsys.readouterr().out
 
 
+def test_cleanup_confirmed_absent_clears_dead_deterministic_creds(client, stub, env_file):
+    # Stored deterministic email + no ID, account confirmed absent remotely:
+    # the dead credentials are cleared so the next teardown can fast-path.
+    env_file.write_text(
+        env_file.read_text(encoding="utf-8")
+        + "PENTEST_USER_A_EMAIL=stackbadger-pentest-a@example.com\n"
+        + "PENTEST_USER_A_PASSWORD=dead-password-123\n",
+        encoding="utf-8",
+    )
+    rc = _run(client, env_file, "--cleanup")  # stub has no users -> absent
+    assert rc == 0
+    values = pa.parse_env_file(env_file)
+    assert "PENTEST_USER_A_EMAIL" not in values
+    assert "PENTEST_USER_A_PASSWORD" not in values
+
+
+def test_cleanup_with_ids_but_no_config_fails_loudly(tmp_path, monkeypatch, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("PENTEST_USER_A_ID=uid-a\n", encoding="utf-8")
+    for key in ("SUPABASE_PROJECT_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_ACCESS_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+    with httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(500))) as client:
+        rc = pa.main(["--cleanup", "--env-file", str(env_file)], http=client)
+    assert rc == 1  # something IS recorded -> must not silently no-op
+    assert "project URL" in capsys.readouterr().err
+
+
+def test_cleanup_mixed_outcome_clears_absent_slot_keeps_failed_slot(client, stub, env_file, capsys):
+    # Slot A: deterministic email, confirmed absent -> creds cleared.
+    # Slot B: stored ID whose deletion 500s -> rc 1, ID retained for retry.
+    env_file.write_text(
+        env_file.read_text(encoding="utf-8")
+        + "PENTEST_USER_A_EMAIL=stackbadger-pentest-a@example.com\n"
+        + "PENTEST_USER_B_ID=uid-b-stuck\n",
+        encoding="utf-8",
+    )
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            return httpx.Response(500, json={"msg": "boom"})
+        return httpx.Response(200, json={"users": []})
+
+    with httpx.Client(transport=httpx.MockTransport(_handler)) as client2:
+        rc = pa.main(["--cleanup", "--env-file", str(env_file)], http=client2)
+    assert rc == 1
+    values = pa.parse_env_file(env_file)
+    assert "PENTEST_USER_A_EMAIL" not in values      # absent slot cleared
+    assert values["PENTEST_USER_B_ID"] == "uid-b-stuck"  # failed slot retained
+    assert "uid-b-stuck" in capsys.readouterr().err
+
+
 def test_recovery_does_not_reset_password_of_custom_email(client, stub, env_file, capsys):
     # An operator-supplied custom email that already exists must NOT have its
     # password silently reset (a typo'd real user's email would lock them out).
