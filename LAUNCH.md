@@ -10,6 +10,39 @@ This file is the agent runbook for StackBadger. Tell Claude Code:
 Follow these steps in order. Ask the user for input where indicated.
 Do NOT proceed past a step until it succeeds.
 
+### Step 0 (optional accelerator): Source stack-detection
+
+**Only if the user has the target's source code.** Black-box bundle discovery
+is the zero-config default and needs nothing — skip to Step 1 when there is no
+source. Source detection exists because a deployed bundle cannot distinguish
+Supabase Auth from Clerk-auth-on-a-Supabase-database (`supabase-js` statically
+bundles the GoTrue client either way), while source can.
+
+```bash
+python discover.py /path/to/target-project --output profiles/<name>.yaml
+```
+
+Read the `[detect-auth]` lines on stderr (machine-readable verdict on the
+`[detect-auth-json]` line: `{provider, confidence, evidence}`):
+
+- **`confidence=high`** — the generated profile's `stack.auth` is set.
+  Present the evidence to the user and confirm it matches their understanding
+  before using the profile.
+- **`confidence=ambiguous`** — multiple active auth libraries were found.
+  `stack.auth` was deliberately left as a `CONFIRM` placeholder. You MUST
+  present the evidence lines to the user, ask which provider actively signs
+  users in, and set `stack.auth` in the profile to their answer. Never pick
+  one yourself.
+- **`confidence=none`** — no auth library detected; fall back to bundle
+  discovery and ask the user what the auth provider is.
+
+The detector layers dependency presence, then active usage (e.g.
+`supabase.auth.*` calls and `@supabase/ssr` middleware vs `@clerk/*` imports),
+then the target's own `CLAUDE.md`/`AGENTS.md` prose — prose is corroboration
+only, and code evidence wins on conflict.
+
+Also review the generated profile for `# TODO` placeholders before using it.
+
 ### Step 1: Gather inputs from the user
 
 If the target URL was not already given in the prompt, ask for it. Then ask for two test accounts:
