@@ -46,13 +46,28 @@ def zap_exclude_regexes(profile_data, *, base_token="${TARGET_BASE_URL}"):
 
     ``${TARGET_BASE_URL}`` is kept LITERAL (ZAP substitutes it at scan time),
     mirroring the static-asset exclusions already in the plan. Each pattern is
-    a full-URL match: ``<base>.*<path>`` with an optional ``[/?]...`` tail so a
-    sub-path or query is covered but a segment-boundary sibling
-    (``/reset-password-help`` vs ``/reset-password``) is not over-excluded.
+    a full-URL match anchored directly after the base —
+    ``<base><path>(?:[/?]...)?`` — so it excludes exactly the root-anchored,
+    segment-boundary set that ``exclusions.is_excluded_path`` excludes at the
+    pytest/discovery seams: a sub-path or query is covered
+    (``/logout`` -> ``/logout/all``), a sibling is not over-excluded
+    (``/reset-password`` does NOT match ``/reset-password-help`` or a nested
+    ``/api/reset-password``).
+
+    The leading ``(?i)`` is load-bearing: ZAP compiles these with
+    ``java.util.regex`` which matches case-SENSITIVELY, but the path filter is
+    case-insensitive (``_normalize_path`` lowercases). Without it the spider
+    could crawl ``/Logout`` while the lowercased exclusion silently misses it.
     """
     patterns = []
     for path in effective_exclude_paths((profile_data or {}).get("exclude_paths")):
-        patterns.append(f"{base_token}.*{re.escape(path)}(?:[/?].*)?")
+        if path == "/":
+            # A root exclusion compiles to a catch-all that would match every
+            # URL and silently disable the whole scan. Skip it here (the pytest
+            # /discovery seams still exclude the literal root path); a bare "/"
+            # exclude_path is almost certainly an operator mistake.
+            continue
+        patterns.append(f"(?i){base_token}{re.escape(path)}(?:[/?].*)?")
     return patterns
 
 

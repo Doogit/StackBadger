@@ -177,8 +177,9 @@ def test_zap_plan_honors_user_exclude_paths_and_uploads():
 
 def test_zap_context_exclude_regexes_cover_default_paths():
     regexes = zap_exclude_regexes({})
-    # Keeps the ${TARGET_BASE_URL} token literal for scan-time substitution.
-    assert all(r.startswith("${TARGET_BASE_URL}") for r in regexes)
+    # Keeps the ${TARGET_BASE_URL} token literal for scan-time substitution
+    # (after the case-insensitive flag).
+    assert all(r.startswith("(?i)${TARGET_BASE_URL}") for r in regexes)
     joined = "\n".join(regexes)
     assert "/logout" in joined
     assert "/auth/v1/token" in joined
@@ -226,8 +227,36 @@ def test_zap_exclude_regex_respects_segment_boundary():
     # Substitute the literal token with a concrete base, then full-match URLs.
     pattern = rx.replace("${TARGET_BASE_URL}", "https://site.com")
     assert _re.fullmatch(pattern, "https://site.com/reset-password")
-    assert _re.fullmatch(pattern, "https://site.com/api/reset-password?token=x")
+    assert _re.fullmatch(pattern, "https://site.com/reset-password?token=x")
+    assert _re.fullmatch(pattern, "https://site.com/reset-password/confirm")
+    # Anchored at the base: a sibling segment is NOT over-excluded...
     assert not _re.fullmatch(pattern, "https://site.com/reset-password-help")
+    # ...and a nested endpoint that merely contains the path is NOT excluded,
+    # matching exclusions.is_excluded_path("/api/reset-password", ["/reset-password"]).
+    assert not _re.fullmatch(pattern, "https://site.com/api/reset-password")
+    assert not is_excluded_path(
+        "/api/reset-password", effective_exclude_paths(["/reset-password"])
+    )
+
+
+def test_zap_exclude_regex_is_case_insensitive():
+    import re as _re
+    rx = next(r for r in zap_exclude_regexes({}) if "logout" in r and "auth" not in r)
+    pattern = rx.replace("${TARGET_BASE_URL}", "https://site.com")
+    # ZAP matches case-sensitively; the (?i) flag must make /Logout match the
+    # lowercased exclusion (the spider crawls real-cased links).
+    assert _re.fullmatch(pattern, "https://site.com/Logout")
+    assert _re.fullmatch(pattern, "https://site.com/LOGOUT/all")
+
+
+def test_zap_exclude_regex_skips_root_path():
+    # A "/" exclude_path would compile to a catch-all; it must be dropped so the
+    # scan is not silently disabled.
+    regexes = zap_exclude_regexes({"exclude_paths": ["/"]})
+    import re as _re
+    for rx in regexes:
+        pattern = rx.replace("${TARGET_BASE_URL}", "https://site.com")
+        assert not _re.fullmatch(pattern, "https://site.com/dashboard")
 
 
 # ---------------------------------------------------------------------------

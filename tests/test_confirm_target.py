@@ -104,6 +104,28 @@ def test_ipv6_loopback_is_exempt(sandbox):
     assert "Discovery / profile assembly failed" in combined
 
 
+def test_routable_ipv6_is_gated_and_matchable(sandbox):
+    # A non-loopback IPv6 literal must be gated; the bracket-preserving
+    # normalizer must let CONFIRM_TARGET=[2001:db8::1] match it (port stripped).
+    stub_doctor(sandbox, 0)
+    refused = run_sh(sandbox, ["http://[2001:db8::1]:8443"])
+    assert refused.returncode == 10
+    assert "CONFIRM_TARGET gate refused" in refused.stderr
+    assert "[2001:db8::1]" in refused.stderr
+
+    proceeded = run_sh(
+        sandbox,
+        ["http://[2001:db8::1]:8443"],
+        env_overrides={
+            "CONFIRM_TARGET": "[2001:db8::1]",
+            "CONFIRM_AUTHORIZED": "[2001:db8::1]",
+        },
+    )
+    combined = proceeded.stdout + proceeded.stderr
+    assert "gate refused" not in combined
+    assert "Target + authorization gates passed" in combined
+
+
 def test_fragment_does_not_confuse_gate_host(sandbox):
     # 'https://stub.invalid#@evil.invalid' — an HTTP client connects to
     # stub.invalid (fragment dropped). The gate must normalize to the same

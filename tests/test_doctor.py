@@ -99,6 +99,14 @@ def test_load_dotenv_does_not_override_existing_env(tmp_path):
     assert env["PENTEST_USER_A_PASSWORD"] == "file-pw"         # gap filled
 
 
+def test_load_dotenv_overwrites_present_but_empty_value(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("PENTEST_USER_A_EMAIL=file@example.com\n", encoding="utf-8")
+    env = {"PENTEST_USER_A_EMAIL": ""}  # present but empty — must be filled
+    doctor.load_dotenv(env_file, env)
+    assert env["PENTEST_USER_A_EMAIL"] == "file@example.com"
+
+
 def test_target_unreachable_fails_with_fix(monkeypatch):
     def _boom(*args, **kwargs):
         raise httpx.ConnectError("dns failure")
@@ -260,6 +268,19 @@ def test_internal_error_emits_json_in_json_mode(monkeypatch, capsys):
     assert payload["passed"] is False
     assert payload["exit_code"] == doctor.EXIT_INTERNAL_ERROR
     assert "kaboom" in payload["error"]
+
+
+def test_internal_error_human_mode_emits_no_json(monkeypatch, capsys):
+    def _boom(*a, **k):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(doctor, "run_doctor", _boom)
+    rc = doctor.main([TARGET])  # no --json
+    assert rc == doctor.EXIT_INTERNAL_ERROR
+    out = capsys.readouterr()
+    assert out.out == ""  # nothing on stdout in human mode
+    assert "doctor-internal" in out.err
+    assert "kaboom" in out.err
 
 
 def test_human_output_pass_fail_lines(tmp_path, monkeypatch, capsys):
