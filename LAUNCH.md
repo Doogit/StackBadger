@@ -235,13 +235,18 @@ python doctor.py <TARGET_URL> <PROFILE_FLAG> --json
 ```
 
 stdout is one JSON object: `{"passed": bool, "exit_code": int, "checks": [...]}`. Each check
-carries a `fix` string when it fails.
+carries a `fix` string when it fails; on an internal doctor error (exit `19`) the JSON also
+carries a top-level `error` string — relay it.
 
 Gate: proceed only when `passed` is `true` (exit `0`). On failure, relay the failing check's
 `fix` to the user and wait — exit codes `10`–`19` identify which check failed (Python version,
 missing credentials, unreachable target, User A/B sign-in). `run.sh` re-runs doctor internally
 and collapses any failure to exit `10`; running it explicitly here catches environment problems
 early and gives you structured output instead of a mid-run abort.
+
+Note: a clean doctor pass does not guarantee `run.sh` exits 0 — the `CONFIRM_TARGET` /
+`CONFIRM_AUTHORIZED` gates (Step 1a) and the `auth.verify_path` fast-fail also exit `10` on
+their own; doctor does not check those.
 
 ### Step 5: Run the harness
 
@@ -298,8 +303,11 @@ harness root (or `reports/output/` if you ran `reports.aggregate`).
 - Exit `2`: MEDIUM/LOW findings only. Summarize as warnings.
 - Exit `3`: Infrastructure error from report aggregation (collection failure, parse error).
 
-Edge case — exit `1` with **no** `reports/output/`: pytest itself failed before aggregation ran.
-Treat as an infrastructure failure and report the stdout/stderr error, not as findings:
+Edge case — **any exit code other than `10` with no `reports/output/`**: pytest died before its
+report was written and aggregation was skipped, so `run.sh` propagated pytest's raw exit code
+(which can be 1–5). The findings-severity interpretation above only applies when
+`reports/output/` is populated; with no reports, treat the exit as an infrastructure failure and
+report the stdout/stderr error, not as findings:
 
 ```bash
 if [ -d reports/output ] && ls reports/output/*.json >/dev/null 2>&1; then
