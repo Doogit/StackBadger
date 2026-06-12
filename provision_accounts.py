@@ -262,9 +262,22 @@ def _admin_create_user(
         if existing:
             # The account predates this run, so the password we are about to
             # write to .env may not be the one GoTrue has (stale .env, prior
-            # partial run). Set it explicitly — otherwise provisioning reports
-            # [ok] with credentials that cannot sign in.
-            _admin_set_password(http, project_url, service_role_key, existing, password)
+            # partial run). For accounts THIS SCRIPT named (deterministic
+            # pattern) set it explicitly — otherwise provisioning reports
+            # [ok] with credentials that cannot sign in. For an operator-
+            # supplied custom email, never silently reset: a typo'd real
+            # user's email here would lock that user out. Same ownership
+            # gate cleanup uses for delete-by-email.
+            if _is_provisioned_email(email):
+                _admin_set_password(http, project_url, service_role_key, existing, password)
+            else:
+                print(
+                    f"[warn] {email} already exists — password NOT changed "
+                    "(not a script-managed account). doctor.py will verify "
+                    "sign-in; if it fails, fix the password in .env or delete "
+                    "the account and re-provision.",
+                    file=sys.stderr,
+                )
             return existing
         raise RuntimeError(
             f"User {email} is already registered but could not be found via the "
@@ -449,19 +462,44 @@ def cleanup(args, env: dict[str, str], env_file: Path, http) -> int:
     """Delete the seeded accounts. Idempotent.
 
     Primary path: delete by the stored ``PENTEST_USER_*_ID``. Fallback: when
-    an ID is missing but the slot's email matches the deterministic pattern
-    this script mints (a first run that failed between create and the .env
-    write leaves exactly that state), look the account up by email and delete
-    it. Custom (operator-supplied) emails are NEVER deleted by lookup.
+    an ID is missing, look the account up by email — the stored email if it
+    matches the deterministic pattern this script mints, or the slot's
+    DEFAULT deterministic email when nothing is stored at all. The default
+    sweep covers the worst orphan state: a provision run that died before
+    its single .env write leaves accounts standing remotely with .env
+    untouched. Custom (operator-supplied) emails are NEVER deleted by
+    lookup. When nothing is recorded locally AND no connection config is
+    available, teardown is a friendly no-op instead of demanding a key it
+    has nothing certain to do with.
     """
     stored_ids = {slot: env.get(id_key, "") for slot, id_key, _, _ in _SLOT_KEYS}
-    fallback_emails = {
-        slot: env.get(email_key, "")
-        for slot, id_key, email_key, _ in _SLOT_KEYS
-        if not env.get(id_key, "") and _is_provisioned_email(env.get(email_key, ""))
-    }
-    if not any(stored_ids.values()) and not fallback_emails:
-        print("[ok] nothing to tear down — no stored PENTEST_USER_*_ID in .env.")
+    fallback_emails: dict[str, str] = {}
+    for slot, id_key, email_key, _ in _SLOT_KEYS:
+        if env.get(id_key, ""):
+            continue
+        stored_email = env.get(email_key, "")
+        if _is_provisioned_email(stored_email):
+            fallback_emails[slot] = stored_email
+        elif not stored_email:
+            # Nothing stored for this slot: sweep the script's own default
+            # email in case a failed run created the account but never got
+            # to write .env.
+            fallback_emails[slot] = _default_email(slot.lower())
+        # else: custom stored email — never delete by lookup.
+
+    nothing_recorded = not any(stored_ids.values()) and not any(
+        _is_provisioned_email(env.get(email_key, "")) for _, _, email_key, _ in _SLOT_KEYS
+    )
+    have_config = bool(
+        (args.project_url or env.get("SUPABASE_PROJECT_URL"))
+        and (env.get(_SERVICE_ROLE_ENV) or env.get(_ACCESS_TOKEN_ENV))
+    )
+    if nothing_recorded and not have_config:
+        print(
+            "[ok] nothing recorded in .env to tear down. (To also sweep the "
+            f"default {_DETERMINISTIC_EMAIL_PREFIX}* accounts remotely, set "
+            "SUPABASE_PROJECT_URL and SUPABASE_SERVICE_ROLE_KEY and re-run.)"
+        )
         return 0
 
     project_url = _resolve_project_url(args, env)
@@ -469,27 +507,32 @@ def cleanup(args, env: dict[str, str], env_file: Path, http) -> int:
 
     remaining: list[str] = []
     cleared: dict[str, str | None] = {}
+    deleted_any = False
     for slot, id_key, email_key, pass_key in _SLOT_KEYS:
         user_id = stored_ids[slot]
-        via_email = False
         if not user_id and slot in fallback_emails:
             try:
                 user_id = _find_user_id_by_email(
                     http, project_url, service_role_key, fallback_emails[slot]
                 ) or ""
-                via_email = True
             except RuntimeError as exc:
                 print(f"[fail] account {slot} email lookup failed: {_scrub(str(exc))}",
                       file=sys.stderr)
                 remaining.append(f"account {slot} ({fallback_emails[slot]})")
                 continue
             if not user_id:
-                continue  # deterministic email never provisioned / already gone
+                # Confirmed absent remotely — stored deterministic creds (if
+                # any) are dead; clear them so the next teardown can fast-path.
+                if _is_provisioned_email(env.get(email_key, "")):
+                    cleared[email_key] = None
+                    cleared[pass_key] = None
+                continue
         if not user_id:
             continue
         try:
             _admin_delete_user(http, project_url, service_role_key, user_id)
             print(f"[ok] account {slot} deleted (id: {user_id})")
+            deleted_any = True
             cleared[id_key] = None
             # A deleted script-named account's credentials are dead — clear
             # them so the next provision mints fresh ones and a second
@@ -511,7 +554,10 @@ def cleanup(args, env: dict[str, str], env_file: Path, http) -> int:
             file=sys.stderr,
         )
         return 1
-    print("[ok] teardown complete — no seeded accounts remain.")
+    if deleted_any:
+        print("[ok] teardown complete — no seeded accounts remain.")
+    else:
+        print("[ok] nothing to tear down — no seeded accounts found.")
     return 0
 
 

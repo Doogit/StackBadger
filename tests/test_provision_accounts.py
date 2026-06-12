@@ -519,7 +519,59 @@ def test_cleanup_never_deletes_custom_email_by_lookup(client, stub, env_file):
     assert "uid-manual" in stub.users  # untouched
 
 
-def test_cleanup_with_nothing_stored_is_a_noop(client, env_file, capsys):
+def test_cleanup_sweeps_orphans_when_env_was_never_written(client, stub, env_file, capsys):
+    # THE orphan state: provision created the accounts but died before its
+    # single .env write. Nothing local points at them — teardown must still
+    # find and delete them via the deterministic default emails.
+    stub.users["uid-orphan-a"] = {"email": "stackbadger-pentest-a@example.com", "payload": {}}
+    stub.users["uid-orphan-b"] = {"email": "stackbadger-pentest-b@example.com", "payload": {}}
+    rc = _run(client, env_file, "--cleanup")  # .env has only connection config
+    assert rc == 0
+    assert stub.users == {}
+    assert "teardown complete" in capsys.readouterr().out
+
+
+def test_cleanup_with_nothing_stored_sweeps_then_reports_nothing(client, stub, env_file, capsys):
+    # Connection config available, nothing recorded, nothing standing: the
+    # default-email sweep runs (lookups only) and reports a clean no-op.
     rc = _run(client, env_file, "--cleanup")
     assert rc == 0
     assert "nothing to tear down" in capsys.readouterr().out
+    assert not any(r.method == "DELETE" for r in stub.requests)
+
+
+def test_cleanup_without_config_and_nothing_recorded_is_friendly_noop(tmp_path, monkeypatch, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("UNRELATED=1\n", encoding="utf-8")
+    for key in ("SUPABASE_PROJECT_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_ACCESS_TOKEN",
+                "PENTEST_USER_A_ID", "PENTEST_USER_B_ID",
+                "PENTEST_USER_A_EMAIL", "PENTEST_USER_B_EMAIL"):
+        monkeypatch.delenv(key, raising=False)
+
+    def _no_network(request):
+        raise AssertionError("no network expected without connection config")
+
+    with httpx.Client(transport=httpx.MockTransport(_no_network)) as client:
+        rc = pa.main(["--cleanup", "--env-file", str(env_file)], http=client)
+    assert rc == 0
+    assert "nothing recorded" in capsys.readouterr().out
+
+
+def test_recovery_does_not_reset_password_of_custom_email(client, stub, env_file, capsys):
+    # An operator-supplied custom email that already exists must NOT have its
+    # password silently reset (a typo'd real user's email would lock them out).
+    stub.users["uid-real"] = {"email": "real-user@corp.example", "payload": {}}
+    env_file.write_text(
+        env_file.read_text(encoding="utf-8")
+        + "PENTEST_USER_A_EMAIL=real-user@corp.example\n",
+        encoding="utf-8",
+    )
+    rc = _run(client, env_file)
+    assert rc == 0
+    real_user_puts = [
+        r for r in stub.requests if r.method == "PUT" and r.url.path.endswith("/uid-real")
+    ]
+    assert not real_user_puts  # never reset
+    assert "password NOT changed" in capsys.readouterr().err
+    values = pa.parse_env_file(env_file)
+    assert values["PENTEST_USER_A_ID"] == "uid-real"  # ID still recovered

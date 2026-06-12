@@ -110,12 +110,15 @@ def test_second_teardown_is_a_noop(env_file, capsys):
         return httpx.Response(200, json={})
 
     assert _run_teardown(env_file, _ok) == 0
-    calls = {"n": 0}
+    deletes = {"n": 0}
 
-    def _count(request: httpx.Request) -> httpx.Response:
-        calls["n"] += 1
-        return httpx.Response(200, json={})
+    def _second(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            deletes["n"] += 1
+            return httpx.Response(200, json={})
+        # Default-email sweep lookups are allowed; nothing is found.
+        return httpx.Response(200, json={"users": []})
 
-    assert _run_teardown(env_file, _count) == 0
-    assert calls["n"] == 0  # no IDs left -> no API traffic at all
+    assert _run_teardown(env_file, _second) == 0
+    assert deletes["n"] == 0  # nothing left to delete
     assert "nothing to tear down" in capsys.readouterr().out
