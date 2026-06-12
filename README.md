@@ -262,7 +262,10 @@ python provision_accounts.py --provider supabase-auth
 
 Creates both accounts via the GoTrue **Admin API** (`POST /auth/v1/admin/users` with
 `email_confirm: true`) and writes the credentials plus the created user IDs into `.env`
-(mode `0600`). It needs the project **service-role key** (`SUPABASE_SERVICE_ROLE_KEY` in `.env`;
+(mode `0600`). Default emails are the deterministic `stackbadger-pentest-a@example.com` /
+`-b@example.com` (existing `PENTEST_USER_*` values in `.env` are reused instead) so a re-run
+after any state loss recovers the same accounts — resetting their password — rather than
+orphaning them. It needs the project **service-role key** (`SUPABASE_SERVICE_ROLE_KEY` in `.env`;
 see `.env.example`). `SUPABASE_ACCESS_TOKEN` — the Management API token used by `--branch` — can
 **not** call the Admin API; the script only uses it, optionally, to fetch the service-role key.
 Re-running is idempotent, and the key is never echoed.
@@ -274,8 +277,9 @@ Re-running is idempotent, and the key is never echoed.
 
 ### Clerk / Firebase / NextAuth — manual (dashboard)
 
-`python provision_accounts.py --provider clerk` (or `firebase` / `nextauth`) prints these steps;
-in short:
+`python provision_accounts.py --provider clerk` (or `firebase` / `nextauth`) prints these steps
+and exits `2` — a distinct code signaling "manual steps required, nothing was provisioned". In
+short:
 
 - **Clerk:** Dashboard → Users → Create user, twice; enable email + password; mark the email
   verified; MFA off.

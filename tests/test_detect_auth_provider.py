@@ -152,3 +152,65 @@ def test_assemble_profile_clerk_repo_unchanged(tmp_path):
     profile = assemble_profile(tmp_path)
     assert profile["stack"]["auth"] == "clerk"
     assert "clerk" in profile  # frontend_api TODO block still emitted
+
+
+def test_assemble_profile_confidence_none_clears_loose_clerk_substring(tmp_path):
+    # detect_stack's loose r"clerk" substring regex sets auth='clerk' for ANY
+    # dependency name containing "clerk"; the verdict (no @clerk/* dep ->
+    # confidence=none) must clear it so the profile matches the printed verdict.
+    _package_json(tmp_path, {"clerk-stub-utils": "^1.0.0"})
+    profile = assemble_profile(tmp_path)
+    assert "auth" not in profile["stack"]
+    assert "clerk" not in profile  # no spurious clerk TODO block either
+
+
+# ---------------------------------------------------------------------------
+# Truncated usage scan must not demote a dual-purpose lib to DB-only
+# ---------------------------------------------------------------------------
+
+def test_truncated_scan_keeps_dual_purpose_lib_as_candidate(tmp_path):
+    # Clerk + Supabase deps; Supabase HAS auth usage, but the scan budget is
+    # too small to see it. Demoting Supabase to DB-only would yield a
+    # confident WRONG 'clerk' pick — instead the verdict must stay ambiguous.
+    _package_json(tmp_path, {"@clerk/nextjs": "^5.0.0", "@supabase/ssr": "^0.10.0"})
+    _write(tmp_path, "src/a.ts", 'import { ClerkProvider } from "@clerk/nextjs";\n')
+    _write(tmp_path, "src/z-middleware.ts", "await supabase.auth.getSession();\n")
+    verdict = detect_auth_provider(tmp_path, max_usage_files=0)
+    assert verdict["confidence"] == "ambiguous"
+    assert any("TRUNCATED" in line for line in verdict["evidence"])
+
+
+def test_untruncated_scan_behaves_as_before(tmp_path):
+    _package_json(tmp_path, {"@clerk/nextjs": "^5.0.0", "@supabase/supabase-js": "^2.0.0"})
+    _write(tmp_path, "src/a.ts", 'import { ClerkProvider } from "@clerk/nextjs";\n')
+    _write(tmp_path, "src/db.ts", 'const rows = await supabase.from("docs").select();\n')
+    verdict = detect_auth_provider(tmp_path)  # default budget, not truncated
+    assert verdict["provider"] == "clerk"
+    assert verdict["confidence"] == "high"
+
+
+# ---------------------------------------------------------------------------
+# [RX-TEST] usage-pattern vectors — the load-bearing no-match case is a
+# Supabase DB call, which must NOT count as auth usage.
+# ---------------------------------------------------------------------------
+
+def test_rx_supabase_auth_usage_pattern_vectors():
+    import re
+
+    from discover import _AUTH_USAGE_PATTERNS
+
+    pattern = _AUTH_USAGE_PATTERNS["supabase-auth"]
+    assert re.search(pattern, "await supabase.auth.getUser();")
+    assert re.search(pattern, 'import { createServerClient } from "@supabase/ssr";')
+    assert not re.search(pattern, 'const rows = await supabase.from("docs").select();')
+    assert not re.search(pattern, 'import { createClient } from "@supabase/supabase-js";')
+
+
+def test_rx_clerk_usage_pattern_vectors():
+    import re
+
+    from discover import _AUTH_USAGE_PATTERNS
+
+    pattern = _AUTH_USAGE_PATTERNS["clerk"]
+    assert re.search(pattern, 'import { clerkMiddleware } from "@clerk/nextjs/server";')
+    assert not re.search(pattern, "// mentions clerk in a comment only")

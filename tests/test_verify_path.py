@@ -168,6 +168,44 @@ def test_doctor_verify_path_other_status_is_inconclusive_pass(monkeypatch):
     assert "inconclusive" in results[0].detail
 
 
+def test_doctor_verify_path_401_fails_like_403(monkeypatch):
+    _patch_doctor(
+        monkeypatch, "/api/me",
+        lambda url, **kw: httpx.Response(401, request=httpx.Request("GET", url)),
+    )
+    results = doctor.check_logins(TARGET, None)
+    assert not results[0].passed
+    assert results[0].exit_code == doctor.EXIT_USER_A_LOGIN
+
+
+def test_doctor_verify_path_network_error_fails(monkeypatch):
+    def _boom(url, **kw):
+        raise httpx.ConnectError("refused")
+
+    _patch_doctor(monkeypatch, "/api/me", _boom)
+    results = doctor.check_logins(TARGET, None)
+    assert not results[0].passed
+    assert "request failed" in results[0].detail
+
+
+def test_doctor_verify_path_does_not_follow_redirects(monkeypatch):
+    # A 302 -> login -> 200 chain must NOT read as a pass: redirects are not
+    # followed and 3xx is inconclusive (with an explanatory detail), never OK.
+    captured = {}
+
+    def _responder(url, **kw):
+        captured.update(kw)
+        return httpx.Response(
+            302, headers={"location": "/login"}, request=httpx.Request("GET", url)
+        )
+
+    _patch_doctor(monkeypatch, "/api/me", _responder)
+    results = doctor.check_logins(TARGET, None)
+    assert captured.get("follow_redirects") is False
+    assert all(r.passed for r in results)  # inconclusive warn, not a fail
+    assert "redirect" in results[0].detail
+
+
 # ---------------------------------------------------------------------------
 # run.sh: structural contract (sign-ins happen before the verify step,
 # and a verify failure routes through the preflight exit)

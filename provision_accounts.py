@@ -33,11 +33,14 @@ Secret handling
   "already registered" response recovers the existing user's ID by listing.
 
 ``--cleanup`` deletes the two accounts by the user IDs stored in ``.env``
-(``PENTEST_USER_A_ID`` / ``PENTEST_USER_B_ID``) and clears the stored IDs.
-``teardown.py`` is a thin wrapper over this flag.
+(``PENTEST_USER_A_ID`` / ``PENTEST_USER_B_ID``) — falling back to a lookup by
+the deterministic ``stackbadger-pentest-*`` email for a run that failed before
+the IDs were written — and clears the stored values. ``teardown.py`` is a thin
+wrapper over this flag.
 
-Exit codes: 0 success (including a no-op cleanup), 1 failure. Failures never
-leave a partially-written ``.env``.
+Exit codes: 0 success (including a no-op cleanup), 1 failure, 2 manual steps
+printed (non-Supabase provider — nothing was provisioned or deleted).
+Failures never leave a partially-written ``.env``.
 """
 
 from __future__ import annotations
@@ -66,6 +69,12 @@ _KEY_ID_B = "PENTEST_USER_B_ID"
 
 _SERVICE_ROLE_ENV = "SUPABASE_SERVICE_ROLE_KEY"
 _ACCESS_TOKEN_ENV = "SUPABASE_ACCESS_TOKEN"
+
+# Exit codes: 0 = provisioned/torn down, 1 = failure, 2 = manual steps were
+# printed (Clerk/Firebase/NextAuth) — nothing was provisioned or deleted.
+EXIT_OK = 0
+EXIT_FAILURE = 1
+EXIT_MANUAL_STEPS = 2
 
 # Secrets shorter than this are not redacted (same guard as reports/scrub.py —
 # too likely to collide with non-secret substrings).
@@ -98,37 +107,39 @@ _MANUAL_PROVIDERS = {
 # Secret redaction (mirror of the reports/scrub.py literal-secret layer)
 # ---------------------------------------------------------------------------
 
-def _redact(text: str, secrets_to_hide: tuple[str, ...]) -> str:
-    """Replace every literal occurrence of each secret in *text*."""
-    for secret in secrets_to_hide:
-        if secret and len(secret) >= _MIN_SECRET_LEN:
-            text = text.replace(secret, "[REDACTED_SERVICE_ROLE_KEY]")
+# Registry of (secret value, redaction label) pairs known at runtime. Every
+# secret this script handles is registered the moment it exists — env-sourced
+# keys, Management-API-fetched keys, generated passwords — so EVERY error
+# print routes through one scrubber, not just the top-level exception handler.
+_RUNTIME_SECRETS: list[tuple[str, str]] = []
+
+
+def _register_secret(value: str | None, label: str) -> None:
+    if value and len(value) >= _MIN_SECRET_LEN:
+        _RUNTIME_SECRETS.append((value, label))
+
+
+def _scrub(text: str) -> str:
+    """Redact every registered secret plus key-shaped patterns from *text*.
+
+    The pattern layer (``sb_secret_*`` / ``eyJ*``) is a belt-and-braces catch
+    for any service-role-key shape that was never registered (e.g. one echoed
+    back by a proxy error page).
+    """
+    for secret, label in _RUNTIME_SECRETS:
+        text = text.replace(secret, f"[REDACTED_{label}]")
+    text = re.sub(r"sb_secret_[A-Za-z0-9_-]+", "[REDACTED_SERVICE_ROLE_KEY]", text)
+    text = re.sub(r"eyJ[A-Za-z0-9._/+=-]{20,}", "[REDACTED_JWT]", text)
     return text
 
 
 # ---------------------------------------------------------------------------
 # .env read / atomic write
 # ---------------------------------------------------------------------------
-
-def parse_env_file(path: Path) -> dict[str, str]:
-    """Parse simple KEY=VALUE lines; ignores comments and blank lines."""
-    values: dict[str, str] = {}
-    if not path.is_file():
-        return values
-    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        values[key.strip()] = value.strip().strip("'\"")
-    return values
-
-
-def load_dotenv(env_file: Path, environ: dict[str, str]) -> None:
-    """Load *env_file* into *environ* without overriding already-set vars."""
-    for key, value in parse_env_file(env_file).items():
-        if key not in environ or not environ[key]:
-            environ[key] = value
+# Read-side helpers come from doctor.py — same parsing semantics everywhere
+# (run.sh `source`, doctor preflight, provisioning) so the three consumers
+# can never drift. The write side (update_env_file) is unique to this script.
+from doctor import load_dotenv, parse_env_file  # noqa: E402
 
 
 def update_env_file(path: Path, updates: dict[str, str | None]) -> None:
@@ -144,20 +155,26 @@ def update_env_file(path: Path, updates: dict[str, str | None]) -> None:
     if path.is_file():
         lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
 
-    remaining = dict(updates)
+    handled: set[str] = set()
     out: list[str] = []
     for line in lines:
         stripped = line.strip()
         key = stripped.partition("=")[0].strip() if "=" in stripped else None
-        if key and not stripped.startswith("#") and key in remaining:
-            value = remaining.pop(key)
+        if key and not stripped.startswith("#") and key in updates:
+            if key in handled:
+                # Drop duplicate lines of a managed key: both bash `source`
+                # and parse_env_file are last-wins, so a surviving later
+                # duplicate would silently shadow the value just written.
+                continue
+            handled.add(key)
+            value = updates[key]
             if value is not None:
                 out.append(f"{key}={value}")
             # None -> drop the line entirely.
         else:
             out.append(line)
-    for key, value in remaining.items():
-        if value is not None:
+    for key, value in updates.items():
+        if key not in handled and value is not None:
             out.append(f"{key}={value}")
 
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".env.", suffix=".tmp")
@@ -243,6 +260,11 @@ def _admin_create_user(
     ):
         existing = _find_user_id_by_email(http, project_url, service_role_key, email)
         if existing:
+            # The account predates this run, so the password we are about to
+            # write to .env may not be the one GoTrue has (stale .env, prior
+            # partial run). Set it explicitly — otherwise provisioning reports
+            # [ok] with credentials that cannot sign in.
+            _admin_set_password(http, project_url, service_role_key, existing, password)
             return existing
         raise RuntimeError(
             f"User {email} is already registered but could not be found via the "
@@ -253,6 +275,23 @@ def _admin_create_user(
     raise RuntimeError(
         f"Admin API create user failed for {email}: HTTP {resp.status_code} — {body}"
     )
+
+
+def _admin_set_password(
+    http, project_url: str, service_role_key: str, user_id: str, password: str
+) -> None:
+    """Set a recovered user's password so .env credentials are live."""
+    resp = http.put(
+        f"{project_url}/auth/v1/admin/users/{user_id}",
+        json={"password": password, "email_confirm": True},
+        headers=_admin_headers(service_role_key),
+        timeout=20.0,
+    )
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(
+            f"Admin API password update failed for user {user_id}: "
+            f"HTTP {resp.status_code} — {resp.text[:300]}"
+        )
 
 
 def _admin_delete_user(http, project_url: str, service_role_key: str, user_id: str) -> bool:
@@ -332,6 +371,7 @@ def _resolve_service_role_key(http, env: dict[str, str], project_url: str) -> st
         )
         fetched = _fetch_service_role_key(http, access_token, project_ref)
         if fetched:
+            _register_secret(fetched, "SERVICE_ROLE_KEY")
             return fetched
     raise RuntimeError(
         f"{_SERVICE_ROLE_ENV} is required (the GoTrue Admin API only accepts the "
@@ -341,8 +381,25 @@ def _resolve_service_role_key(http, env: dict[str, str], project_url: str) -> st
     )
 
 
-def _generate_email(slot: str) -> str:
-    return f"stackbadger-{slot}-{secrets.token_hex(4)}@example.com"
+# Deterministic default emails (no random suffix) so a re-run after ANY state
+# loss — stale .env, first-run failure between accounts, deleted .env —
+# collides with the existing account, recovers its ID, and resets its password
+# (see _admin_create_user) instead of orphaning it and minting a new one.
+_DETERMINISTIC_EMAIL_PREFIX = "stackbadger-pentest-"
+
+
+def _default_email(slot: str) -> str:
+    return f"{_DETERMINISTIC_EMAIL_PREFIX}{slot}@example.com"
+
+
+def _is_provisioned_email(email: str) -> bool:
+    """True when *email* matches the deterministic pattern this script mints.
+
+    Used by cleanup as the safety gate for delete-by-email fallback: an
+    operator's manually-created account (custom email) must never be deleted
+    by lookup — only accounts this script itself named.
+    """
+    return email.strip().lower().startswith(_DETERMINISTIC_EMAIL_PREFIX)
 
 
 def provision(args, env: dict[str, str], env_file: Path, http) -> int:
@@ -350,13 +407,16 @@ def provision(args, env: dict[str, str], env_file: Path, http) -> int:
     project_url = _resolve_project_url(args, env)
     service_role_key = _resolve_service_role_key(http, env, project_url)
 
-    # Reuse .env credentials when present so re-runs are idempotent; generate
-    # strong random ones otherwise. Both accounts are resolved BEFORE any
-    # write, so .env is only ever rewritten once, with complete data.
-    email_a = env.get(_KEY_EMAIL_A) or _generate_email("a")
+    # Reuse .env credentials when present so operator-chosen accounts are
+    # honored; otherwise use deterministic emails + strong random passwords.
+    # Both accounts are resolved BEFORE any write, so .env is only ever
+    # rewritten once, with complete data.
+    email_a = env.get(_KEY_EMAIL_A) or _default_email("a")
     pass_a = env.get(_KEY_PASS_A) or secrets.token_urlsafe(18)
-    email_b = env.get(_KEY_EMAIL_B) or _generate_email("b")
+    email_b = env.get(_KEY_EMAIL_B) or _default_email("b")
     pass_b = env.get(_KEY_PASS_B) or secrets.token_urlsafe(18)
+    _register_secret(pass_a, "PASSWORD")
+    _register_secret(pass_b, "PASSWORD")
 
     id_a = _admin_create_user(http, project_url, service_role_key, email_a, pass_a)
     print(f"[ok] account A provisioned: {email_a} (id: {id_a})")
@@ -379,10 +439,28 @@ def provision(args, env: dict[str, str], env_file: Path, http) -> int:
     return 0
 
 
+_SLOT_KEYS = (
+    ("A", _KEY_ID_A, _KEY_EMAIL_A, _KEY_PASS_A),
+    ("B", _KEY_ID_B, _KEY_EMAIL_B, _KEY_PASS_B),
+)
+
+
 def cleanup(args, env: dict[str, str], env_file: Path, http) -> int:
-    """Delete the seeded accounts by stored ID. Idempotent."""
-    stored = {slot: env.get(key, "") for slot, key in (("A", _KEY_ID_A), ("B", _KEY_ID_B))}
-    if not any(stored.values()):
+    """Delete the seeded accounts. Idempotent.
+
+    Primary path: delete by the stored ``PENTEST_USER_*_ID``. Fallback: when
+    an ID is missing but the slot's email matches the deterministic pattern
+    this script mints (a first run that failed between create and the .env
+    write leaves exactly that state), look the account up by email and delete
+    it. Custom (operator-supplied) emails are NEVER deleted by lookup.
+    """
+    stored_ids = {slot: env.get(id_key, "") for slot, id_key, _, _ in _SLOT_KEYS}
+    fallback_emails = {
+        slot: env.get(email_key, "")
+        for slot, id_key, email_key, _ in _SLOT_KEYS
+        if not env.get(id_key, "") and _is_provisioned_email(env.get(email_key, ""))
+    }
+    if not any(stored_ids.values()) and not fallback_emails:
         print("[ok] nothing to tear down — no stored PENTEST_USER_*_ID in .env.")
         return 0
 
@@ -391,16 +469,37 @@ def cleanup(args, env: dict[str, str], env_file: Path, http) -> int:
 
     remaining: list[str] = []
     cleared: dict[str, str | None] = {}
-    for slot, key in (("A", _KEY_ID_A), ("B", _KEY_ID_B)):
-        user_id = stored[slot]
+    for slot, id_key, email_key, pass_key in _SLOT_KEYS:
+        user_id = stored_ids[slot]
+        via_email = False
+        if not user_id and slot in fallback_emails:
+            try:
+                user_id = _find_user_id_by_email(
+                    http, project_url, service_role_key, fallback_emails[slot]
+                ) or ""
+                via_email = True
+            except RuntimeError as exc:
+                print(f"[fail] account {slot} email lookup failed: {_scrub(str(exc))}",
+                      file=sys.stderr)
+                remaining.append(f"account {slot} ({fallback_emails[slot]})")
+                continue
+            if not user_id:
+                continue  # deterministic email never provisioned / already gone
         if not user_id:
             continue
         try:
             _admin_delete_user(http, project_url, service_role_key, user_id)
             print(f"[ok] account {slot} deleted (id: {user_id})")
-            cleared[key] = None
+            cleared[id_key] = None
+            # A deleted script-named account's credentials are dead — clear
+            # them so the next provision mints fresh ones and a second
+            # teardown is a true no-op.
+            if _is_provisioned_email(env.get(email_key, "")):
+                cleared[email_key] = None
+                cleared[pass_key] = None
         except RuntimeError as exc:
-            print(f"[fail] account {slot} (id: {user_id}) NOT deleted: {exc}", file=sys.stderr)
+            print(f"[fail] account {slot} (id: {user_id}) NOT deleted: {_scrub(str(exc))}",
+                  file=sys.stderr)
             remaining.append(f"account {slot} (id: {user_id})")
 
     if cleared:
@@ -442,19 +541,32 @@ def main(argv: list[str] | None = None, http=None) -> int:
     args = parser.parse_args(argv)
 
     if args.provider in _MANUAL_PROVIDERS:
-        print(_MANUAL_PROVIDERS[args.provider])
-        return 0
+        # Exit 2, NOT 0: printing instructions is not a provisioning success,
+        # and an agent gating on "exit 0 -> accounts exist" must be able to
+        # tell the two apart (LAUNCH.md Step 3a).
+        if args.cleanup:
+            print(
+                f"--cleanup only automates Supabase Auth. For {args.provider}, "
+                "delete the two test accounts in the provider dashboard — the "
+                "same place they were created."
+            )
+        else:
+            print(_MANUAL_PROVIDERS[args.provider])
+        return EXIT_MANUAL_STEPS
 
     env_file = Path(args.env_file)
     env: dict[str, str] = dict(os.environ)
     load_dotenv(env_file, env)
 
-    # Everything that can see the service-role key runs inside this scrubbed
-    # boundary: exceptions are caught, their text AND traceback redacted, and
-    # only then printed. The key never reaches stdout/stderr.
-    secrets_to_hide = tuple(
-        v for v in (env.get(_SERVICE_ROLE_ENV, ""), env.get(_ACCESS_TOKEN_ENV, "")) if v
-    )
+    _RUNTIME_SECRETS.clear()  # fresh registry per invocation (tests call main() repeatedly)
+
+    # Everything that can see a secret runs inside this scrubbed boundary:
+    # secrets are registered the moment they exist (env keys here; fetched
+    # keys and generated passwords at their creation sites), every error
+    # print routes through _scrub(), and the top-level handler scrubs the
+    # message AND traceback before printing. No secret reaches stdout/stderr.
+    _register_secret(env.get(_SERVICE_ROLE_ENV, ""), "SERVICE_ROLE_KEY")
+    _register_secret(env.get(_ACCESS_TOKEN_ENV, ""), "ACCESS_TOKEN")
     own_client = http is None
     if own_client:
         import httpx
@@ -463,14 +575,8 @@ def main(argv: list[str] | None = None, http=None) -> int:
         if args.cleanup:
             return cleanup(args, env, env_file, http)
         return provision(args, env, env_file, http)
-    except Exception as exc:
-        # A key fetched via the Management API isn't in `env`; scrub the
-        # generic sb_secret_/JWT shapes too so a fetched key can't leak either.
-        text = f"ERROR: {exc}\n{traceback.format_exc()}"
-        text = _redact(text, secrets_to_hide)
-        text = re.sub(r"sb_secret_[A-Za-z0-9_-]+", "[REDACTED_SERVICE_ROLE_KEY]", text)
-        text = re.sub(r"eyJ[A-Za-z0-9._/+=-]{20,}", "[REDACTED_JWT]", text)
-        print(text, file=sys.stderr)
+    except Exception:
+        print(_scrub(f"ERROR: {traceback.format_exc()}"), file=sys.stderr)
         return 1
     finally:
         if own_client:

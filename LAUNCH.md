@@ -22,8 +22,16 @@ bundles the GoTrue client either way), while source can.
 python discover.py /path/to/target-project --output profiles/<name>.yaml
 ```
 
-Read the `[detect-auth]` lines on stderr (machine-readable verdict on the
-`[detect-auth-json]` line: `{provider, confidence, evidence}`):
+The verdict goes to **stderr** (stdout is the profile YAML when not using
+`--output`), mixed with human-readable evidence lines. Capture and extract it
+like this:
+
+```bash
+python discover.py /path/to/target-project --output profiles/<name>.yaml 2>detect-auth.log
+grep -F '[detect-auth-json]' detect-auth.log   # one JSON line: {provider, confidence, evidence}
+```
+
+Then act on the verdict:
 
 - **`confidence=high`** — the generated profile's `stack.auth` is set.
   Present the evidence to the user and confirm it matches their understanding
@@ -170,8 +178,12 @@ created user IDs into `.env` with mode `0600`.
 > set -a; source .env; set +a
 > ```
 
-Gate: do not proceed until the script exits 0. If it fails, relay the error (it is already
-secret-redacted) and wait for the user.
+Gate: do not proceed until the script exits **0**. Exit codes: `0` = both
+accounts provisioned and written to `.env`; `1` = failure — relay the error
+(it is already secret-redacted) and wait for the user; `2` = you ran it with a
+non-Supabase `--provider` and it only PRINTED manual dashboard steps — nothing
+was provisioned, so wait for the user to confirm the accounts exist and then
+write `.env` via Step 3.
 
 ### Step 4: Choose a profile (optional but recommended)
 
@@ -304,8 +316,10 @@ them from the known platform-dependent findings listed in the README.
 python teardown.py
 ```
 
-Deletes the two seeded accounts by the user IDs stored in `.env` and clears them. Idempotent —
-safe to re-run. Gate: if it exits non-zero, relay which account is still standing and wait; the
+Requires `SUPABASE_SERVICE_ROLE_KEY` and `SUPABASE_PROJECT_URL` in `.env` (or pass
+`--project-url`) — the same values Step 3a used. Deletes the two seeded accounts by the user IDs
+stored in `.env` (falling back to a lookup of the script's own `stackbadger-pentest-*` emails if a
+failed run never stored the IDs) and clears the stored values. Idempotent — safe to re-run. Gate: if it exits non-zero, relay which account is still standing and wait; the
 seeded accounts are real, confirmed users in the target's auth system and must not outlive the
 test. (Branch databases were already deleted by `run.sh`'s exit trap. If the accounts were
 created manually in a dashboard, delete them there instead.)

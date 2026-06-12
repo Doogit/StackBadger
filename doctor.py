@@ -82,8 +82,12 @@ class CheckResult:
     exit_code: int = EXIT_OK
 
 
-def _parse_env_file(path: Path) -> dict[str, str]:
-    """Parse simple KEY=VALUE lines; ignores comments and blank lines."""
+def parse_env_file(path: Path) -> dict[str, str]:
+    """Parse simple KEY=VALUE lines; ignores comments and blank lines.
+
+    Shared with provision_accounts.py (imported there) so .env parsing
+    semantics cannot drift between the preflight and provisioning scripts.
+    """
     values: dict[str, str] = {}
     if not path.is_file():
         return values
@@ -104,7 +108,7 @@ def load_dotenv(env_file: Path, environ: dict[str, str]) -> None:
     Existing environment values win — mirroring shell ``source`` order, where
     the caller's explicit exports were applied last.
     """
-    for key, value in _parse_env_file(env_file).items():
+    for key, value in parse_env_file(env_file).items():
         if key not in environ or not environ[key]:
             environ[key] = value
 
@@ -116,7 +120,7 @@ def required_env_keys(env_example: Path) -> tuple[str, ...]:
     ones (optional vars are shipped commented out). Falls back to the four
     PENTEST_USER_* keys when the file is absent.
     """
-    keys = tuple(_parse_env_file(env_example).keys())
+    keys = tuple(parse_env_file(env_example).keys())
     return keys or _FALLBACK_REQUIRED_KEYS
 
 
@@ -195,7 +199,11 @@ def _check_verify_path(target_url: str, verify_path: str, headers: dict, who: st
 
     url = target_url.rstrip("/") + verify_path
     try:
-        resp = httpx.get(url, headers=headers, timeout=15.0, follow_redirects=True)
+        # Redirects are deliberately NOT followed: middleware that rejects a
+        # bad credential with 302 -> /login -> 200 would otherwise read as a
+        # 2xx "pass" for exactly the wrong-adapter condition this check
+        # exists to catch.
+        resp = httpx.get(url, headers=headers, timeout=15.0, follow_redirects=False)
     except httpx.HTTPError as exc:
         return (
             False,
@@ -212,6 +220,15 @@ def _check_verify_path(target_url: str, verify_path: str, headers: dict, who: st
             f"the provider issued a credential the API rejects — either the "
             f"{who} account is broken in the target app, or stack.auth selects "
             "the wrong adapter (token from the wrong issuer; see LAUNCH.md Step 0)",
+        )
+    if 300 <= resp.status_code < 400:
+        return (
+            True,
+            f"verify_path {verify_path} -> HTTP {resp.status_code} redirect "
+            "(inconclusive — redirects are not followed; a redirect-to-login is "
+            "indistinguishable from rejection. Point auth.verify_path at a "
+            "direct API route that answers 2xx/401 itself)",
+            "",
         )
     return (
         True,

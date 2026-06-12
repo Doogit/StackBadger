@@ -6,10 +6,13 @@ Usage:
 
 Thin wrapper over ``provision_accounts.py --cleanup``: deletes the two test
 accounts by the user IDs ``provision_accounts.py`` stored in ``.env``
-(``PENTEST_USER_A_ID`` / ``PENTEST_USER_B_ID``) via the GoTrue Admin API, then
-clears the stored IDs. Idempotent — running it again (or with nothing
-provisioned) is a no-op that exits 0. A failed deletion exits non-zero and
-names what is still standing.
+(``PENTEST_USER_A_ID`` / ``PENTEST_USER_B_ID``) via the GoTrue Admin API —
+falling back to a lookup by the script's own deterministic
+``stackbadger-pentest-*`` emails when a failed run never stored the IDs —
+then clears the stored values. Idempotent — running it again (or with nothing
+provisioned) is a no-op that exits 0. A failed deletion exits 1 and names
+what is still standing; ``--provider clerk|firebase|nextauth`` exits 2 after
+printing where to delete manually (this script only automates Supabase).
 
 What teardown does NOT cover (by design):
 

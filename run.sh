@@ -557,12 +557,16 @@ info "Sign-in OK — user_b authenticated."
 # later. Unset -> warn + skip (black-box safe). Exits 10 (preflight), never
 # aggregate's 0/1/2/3.
 info "Checking auth.verify_path (if set)..."
+# The status-interpretation logic (2xx / 401-403 / 3xx-no-follow /
+# inconclusive) lives in doctor._check_verify_path — ONE source of truth for
+# both the doctor preflight and this pre-scan check; only the per-account
+# loop and adapter plumbing live here.
 "$PYTHON_BIN" -c "
 import sys, os
 sys.path.insert(0, '.')
-import httpx
 from profile import load_profile
 from auth import create_adapter
+from doctor import _check_verify_path
 
 profile = load_profile(os.environ['PENTEST_PROFILE'])
 verify_path = (profile.auth and profile.auth.verify_path) or ''
@@ -570,28 +574,20 @@ if not verify_path:
     print('[verify-path] auth.verify_path not set — skipping the pre-scan auth verification (black-box mode).', file=sys.stderr)
     raise SystemExit(0)
 base_url = os.environ.get('TARGET_BASE_URL') or (profile.target and profile.target.base_url) or ''
-url = base_url.rstrip('/') + verify_path
 adapter = create_adapter(profile)
 failures = []
 try:
-    for account in ('user_a', 'user_b'):
-        headers = adapter.get_headers(account)
-        resp = httpx.get(url, headers=headers, timeout=15.0, follow_redirects=True)
-        if 200 <= resp.status_code < 300:
-            print(f'[verify-path] {account}: {verify_path} -> HTTP {resp.status_code} OK', file=sys.stderr)
-        elif resp.status_code in (401, 403):
-            failures.append(
-                f'{account}: {verify_path} -> HTTP {resp.status_code}. The provider issued a '
-                f'credential the API rejects — either the {account} account is broken in the '
-                'target app, or stack.auth selects the WRONG adapter (token from the wrong '
-                'issuer). Fix stack.auth (LAUNCH.md Step 0) or the account.'
-            )
+    for account, who in (('user_a', 'User A'), ('user_b', 'User B')):
+        try:
+            headers = adapter.get_headers(account)
+        except Exception as exc:
+            failures.append(f'{account}: sign-in failed while fetching headers for the verify_path check: {exc}')
+            continue
+        ok, detail, fix = _check_verify_path(base_url, verify_path, headers, who)
+        if ok:
+            print(f'[verify-path] {account}: {detail}', file=sys.stderr)
         else:
-            print(
-                f'[verify-path] {account}: {verify_path} -> HTTP {resp.status_code} — inconclusive '
-                '(expected 2xx). Is auth.verify_path an API-layer route? Continuing.',
-                file=sys.stderr,
-            )
+            failures.append(f'{account}: {detail}. Fix: {fix}')
 finally:
     if hasattr(adapter, 'close'):
         adapter.close()

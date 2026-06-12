@@ -241,11 +241,23 @@ def _auth_deps_present(root: Path) -> dict[str, str]:
     return found
 
 
-def _auth_usage_evidence(root: Path) -> dict[str, list[str]]:
-    """Return {provider: [evidence lines]} for active auth usage in source."""
+def _auth_usage_evidence(
+    root: Path, max_files: int = 2000
+) -> tuple[dict[str, list[str]], bool]:
+    """Return ({provider: [evidence lines]}, scan_truncated) for active auth usage.
+
+    ``scan_truncated`` is True when the repo has more candidate source files
+    than the grep budget — absence of usage evidence is then NOT evidence of
+    absence, and the caller must not demote a dual-purpose library to
+    "database-only" on that basis.
+    """
+    _USAGE_EXTS = {".js", ".ts", ".mjs", ".jsx", ".tsx"}
+    candidate_count = sum(1 for f in _walk_files(root) if f.suffix in _USAGE_EXTS)
+    truncated = candidate_count > max_files
+
     usage: dict[str, list[str]] = {}
     for provider, pattern in _AUTH_USAGE_PATTERNS.items():
-        hits = _grep_files(root, pattern, "**/*.{js,ts,mjs,jsx,tsx}")
+        hits = _grep_files(root, pattern, "**/*.{js,ts,mjs,jsx,tsx}", max_files=max_files)
         lines: list[str] = []
         for path, line in hits[:3]:  # a few concrete examples beat a flood
             try:
@@ -258,7 +270,7 @@ def _auth_usage_evidence(root: Path) -> dict[str, list[str]]:
             if len(hits) > 3:
                 lines.append(f"(+{len(hits) - 3} more matches)")
             usage[provider] = lines
-    return usage
+    return usage, truncated
 
 
 def _auth_prose_claims(root: Path) -> dict[str, str]:
@@ -282,7 +294,7 @@ def _auth_prose_claims(root: Path) -> dict[str, str]:
     return claims
 
 
-def detect_auth_provider(root: Path) -> dict[str, Any]:
+def detect_auth_provider(root: Path, max_usage_files: int = 2000) -> dict[str, Any]:
     """Detect the project's ACTIVE auth provider from source, with a verdict.
 
     Layered signals, strongest first:
@@ -300,11 +312,16 @@ def detect_auth_provider(root: Path) -> dict[str, Any]:
     confirm with a human — never silently pick); none -> ``none``.
     """
     deps = _auth_deps_present(root)
-    usage = _auth_usage_evidence(root)
+    usage, scan_truncated = _auth_usage_evidence(root, max_files=max_usage_files)
     prose = _auth_prose_claims(root)
 
     evidence: list[str] = []
     candidates: list[str] = []
+    if scan_truncated:
+        evidence.append(
+            f"usage scan TRUNCATED (more than {max_usage_files} source files) — "
+            "absence of usage evidence is not evidence of absence"
+        )
     for provider, dep_evidence in deps.items():
         dedicated = _AUTH_DEP_PATTERNS[provider][1]
         used = provider in usage
@@ -320,6 +337,16 @@ def detect_auth_provider(root: Path) -> dict[str, Any]:
             evidence.append(
                 f"{provider}: {dep_evidence} (sole auth-capable library; no "
                 "auth API usage detected)"
+            )
+        elif scan_truncated:
+            # A truncated scan may simply not have REACHED this library's
+            # auth calls. Demoting it to "database-only" here could flip an
+            # honest ambiguous verdict into a confident wrong pick, so keep
+            # it as a candidate and let the confirm step decide.
+            candidates.append(provider)
+            evidence.append(
+                f"{provider}: {dep_evidence} — no auth API usage found, but "
+                "the usage scan was truncated; kept as a candidate"
             )
         else:
             evidence.append(
@@ -667,6 +694,12 @@ def assemble_profile(root: Path) -> dict[str, Any]:
             "CONFIRM  # TODO: ambiguous — multiple active auth libraries "
             "detected; see the [detect-auth] evidence and set explicitly"
         )
+    else:
+        # No auth-capable dependency found. detect_stack's loose substring
+        # regex can still have set auth='clerk' (e.g. any package name
+        # containing "clerk"); leaving it would emit a profile that
+        # contradicts the printed verdict — the silent default U4 removes.
+        stack.pop("auth", None)
 
     endpoints = discover_endpoints(root, stack)
     sfm = build_source_file_map(root, endpoints, stack)
