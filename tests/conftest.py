@@ -53,6 +53,12 @@ if str(_HERE) not in sys.path:
 
 from auth import create_adapter  # noqa: E402
 from auth.base import AuthConfigError  # noqa: E402
+from exclusions import (  # noqa: E402
+    effective_exclude_paths,
+    effective_exclude_tables,
+    is_excluded_path,
+    is_excluded_table,
+)
 from profile import load_profile  # noqa: E402
 from profile_assembler import assemble_profile  # noqa: E402
 
@@ -456,18 +462,27 @@ def endpoints_for_category(profile, category: str) -> list[dict]:
 
     Categories: authenticated, anonymous, webhook, internal, payment.
     Converts _AttrDict endpoints to plain dicts for easier consumption.
+    Endpoints matching the profile's effective ``exclude_paths`` (user list
+    union the default-on list — session/state-destroying paths like /logout)
+    are filtered out here, the single enumeration seam every probe module
+    reads endpoints through. See exclusions.py.
     """
     eps = getattr(profile.endpoints, category, None)
     if not eps:
         return []
+    exclude_paths = effective_exclude_paths(profile.exclude_paths)
     result = []
     for ep in eps:
         if hasattr(ep, 'items'):
-            result.append(dict(ep.items()))
+            ep_dict = dict(ep.items())
         elif hasattr(ep, '__dict__'):
-            result.append({k: v for k, v in vars(ep).items() if not k.startswith('_')})
+            ep_dict = {k: v for k, v in vars(ep).items() if not k.startswith('_')}
         else:
-            result.append(ep)
+            ep_dict = ep
+        path = ep_dict.get("path") if isinstance(ep_dict, dict) else None
+        if path and is_excluded_path(path, exclude_paths):
+            continue
+        result.append(ep_dict)
     return result
 
 
@@ -490,12 +505,21 @@ def probe_body_for(endpoint: dict) -> dict:
 
 
 def all_tables(profile, tier: str) -> list[str]:
-    """Return table list from profile.supabase.tables[tier]."""
+    """Return table list from profile.supabase.tables[tier].
+
+    Tables matching the profile's effective ``exclude_tables`` (user list
+    union the default-on list) are filtered out here — ``exclude_paths`` is
+    path-only and does NOT cover PostgREST table probes
+    (``/rest/v1/<table>?id=eq.<uuid>``); this is the seam that does.
+    """
     tables = profile.supabase and profile.supabase.tables
     if not tables:
         return []
     tier_list = getattr(tables, tier, None)
-    return list(tier_list) if tier_list else []
+    if not tier_list:
+        return []
+    exclude_tables = effective_exclude_tables(profile.exclude_tables)
+    return [t for t in tier_list if not is_excluded_table(t, exclude_tables)]
 
 
 def all_rpcs(profile, tier: str) -> list[dict]:

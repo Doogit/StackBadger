@@ -16,6 +16,7 @@ import sys
 from typing import Any
 
 from discover import discover_live
+from exclusions import effective_exclude_paths, effective_exclude_tables
 from profile import Profile, load_profile
 from providers import ProviderManifest
 
@@ -213,6 +214,14 @@ def assemble_profile(
     env_overrides = _env_overrides()
     if env_overrides:
         data = _deep_merge(data, env_overrides)
+
+    # Probe exclusions: bake the effective lists (union of user-supplied and
+    # the default-on lists) into the assembled profile so every seam — pytest
+    # enumeration, discovery, ZAP plan injection — reads ONE explicit value
+    # from the frozen artifact. An empty/absent user list still gets the
+    # defaults; there is no opt-out via the profile.
+    data["exclude_paths"] = effective_exclude_paths(data.get("exclude_paths"))
+    data["exclude_tables"] = effective_exclude_tables(data.get("exclude_tables"))
 
     # Validate minimum required fields.
     target = data.get("target")

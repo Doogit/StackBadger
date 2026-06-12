@@ -10,6 +10,38 @@ fail() { echo "ERROR: $*" >&2; exit 1; }
 warn() { echo "WARN:  $*" >&2; }
 info() { echo "INFO:  $*"; }
 
+# Preflight/gate failures exit 10 — deliberately OUTSIDE reports/aggregate.py's
+# finding-severity exit contract (0/1/2/3) so an agent or CI can never misread
+# "environment not ready / run refused" as "scan ran and found things".
+fail_preflight() { echo "ERROR: $*" >&2; exit 10; }
+
+# Normalize a URL or host for gate comparison: strip scheme, fragment, query,
+# path, userinfo, and port; lowercase. Returns the bare host an HTTP client
+# would actually connect to.
+#
+# Order matters for gate integrity: the fragment and query are stripped FIRST,
+# because an HTTP client drops them before host resolution. Stripping userinfo
+# (@) before the fragment would let a crafted URL like
+# 'https://good.com#@evil.com' normalize to 'evil.com' while the client
+# connects to 'good.com' — a target-confusion that defeats the gate.
+# Bracketed IPv6 literals ([::1]) are preserved whole (the :port strip only
+# applies to a port that follows the closing bracket).
+_normalize_host() {
+  local h="$1"
+  h="${h#*://}"      # strip scheme
+  h="${h%%#*}"       # strip fragment (before userinfo — see above)
+  h="${h%%\?*}"      # strip query
+  h="${h%%/*}"       # strip path
+  h="${h##*@}"       # strip userinfo
+  if [[ "$h" == \[*\]* ]]; then
+    # Bracketed IPv6 literal: keep "[....]", drop any trailing :port.
+    h="${h%%\]*}]"
+  else
+    h="${h%%:*}"     # strip :port
+  fi
+  printf '%s' "$h" | tr '[:upper:]' '[:lower:]'
+}
+
 # ---------------------------------------------------------------------------
 # Args
 # ---------------------------------------------------------------------------
@@ -103,11 +135,20 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # ---------------------------------------------------------------------------
-# Pre-flight: Python 3.11+
+# Pre-flight: locate a Python 3.11+ interpreter
 # ---------------------------------------------------------------------------
+# (doctor.py re-verifies the version as its first check; this loop exists to
+# find the interpreter that runs doctor.py at all. A pre-set PYTHON_BIN env
+# var takes precedence — used by the shell-level test harness and by callers
+# pinning a specific venv interpreter.)
 info "Checking Python version..."
+_PY_CANDIDATES=()
+if [[ -n "${PYTHON_BIN:-}" ]]; then
+  _PY_CANDIDATES+=("$PYTHON_BIN")
+fi
+_PY_CANDIDATES+=(python3 python)
 PYTHON_BIN=""
-for candidate in python3 python; do
+for candidate in "${_PY_CANDIDATES[@]}"; do
   if command -v "$candidate" &>/dev/null; then
     if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
       PYTHON_BIN="$candidate"
@@ -177,6 +218,53 @@ delete_branch(sys.argv[1], sys.argv[2], os.environ['SUPABASE_ACCESS_TOKEN'])
   fi
 }
 trap _cleanup_on_exit EXIT INT TERM
+
+# ---------------------------------------------------------------------------
+# Target-confirmation + authorization gates (EVERY remote run, read-only too)
+# ---------------------------------------------------------------------------
+# Read-only runs still fire enumeration/injection/CORS/ZAP traffic at the
+# target, so BOTH gates apply to any non-localhost host, in every mode:
+#
+#   CONFIRM_TARGET     — "this is the right host" (typo/wrong-env guard)
+#   CONFIRM_AUTHORIZED — "a human affirmed authorization to test this host"
+#
+# Each must EXACT-match the host of the EFFECTIVE TARGET — the URL this run
+# will actually scan (scheme/case/port-insensitive, NO subdomain cross-match:
+# api.example.com != example.com). The effective target is the URL you pass to
+# run.sh, OR the TARGET_BASE_URL env override when that is set (TARGET_BASE_URL
+# wins over the CLI arg, same as the scan target below). Confirming and
+# scanning are the SAME resolved value (EFFECTIVE_TARGET), so the gate can
+# never confirm one host and scan another.
+#
+# It is NOT a post-redirect host: the gate runs before any network contact (so
+# it cannot, and must not, resolve a redirect against an unconfirmed/
+# unauthorized host), and discovery pins target.base_url to this same value
+# anyway. So to test the www host of an apex that redirects, pass/override the
+# www URL and confirm www.example.com. The values are meant to be set by the
+# HUMAN out-of-band — an agent following LAUNCH.md must not set
+# CONFIRM_AUTHORIZED for itself. --yes (AUTO_YES) does NOT bypass either gate.
+# localhost / 127.0.0.1 / [::1] are exempt. Placed before the branch-DB
+# lifecycle so a refused run performs zero remote side effects.
+#
+# SCOPE: the gate governs the application host. Discovery harvests the target's
+# Supabase project URL from its JS bundle, and PostgREST/IDOR/RLS probes hit
+# that <ref>.supabase.co backend — which is implicitly in scope as the target's
+# own backend. Confirm you are authorized to test the whole deployment, not
+# just the front-end host, before proceeding.
+#
+# EFFECTIVE_TARGET is resolved ONCE here and reused for reachability/discovery
+# below, so the gated host and the scanned host are guaranteed identical.
+EFFECTIVE_TARGET="${TARGET_BASE_URL:-$TARGET_URL}"
+_TARGET_HOST="$(_normalize_host "$EFFECTIVE_TARGET")"
+if [[ "$_TARGET_HOST" != "localhost" && "$_TARGET_HOST" != "127.0.0.1" && "$_TARGET_HOST" != "[::1]" ]]; then
+  if [[ -z "${CONFIRM_TARGET:-}" || "$(_normalize_host "${CONFIRM_TARGET:-}")" != "$_TARGET_HOST" ]]; then
+    fail_preflight "CONFIRM_TARGET gate refused: this run would scan '$_TARGET_HOST'. To confirm the target, run:  export CONFIRM_TARGET=$_TARGET_HOST  (exact host match required; --yes does not bypass this gate)"
+  fi
+  if [[ -z "${CONFIRM_AUTHORIZED:-}" || "$(_normalize_host "${CONFIRM_AUTHORIZED:-}")" != "$_TARGET_HOST" ]]; then
+    fail_preflight "CONFIRM_AUTHORIZED gate refused: authorization to test '$_TARGET_HOST' has not been affirmed. The site OWNER (a human, not the agent) must run:  export CONFIRM_AUTHORIZED=$_TARGET_HOST  — only do this for systems you own or are explicitly authorized, in writing, to test."
+  fi
+  info "Target + authorization gates passed for host: $_TARGET_HOST"
+fi
 
 # ---------------------------------------------------------------------------
 # Mode selection
@@ -276,16 +364,6 @@ wait_for_ready(sys.argv[1], sys.argv[2], os.environ['SUPABASE_ACCESS_TOKEN'])
 fi
 
 # ---------------------------------------------------------------------------
-# Pre-flight: Required credentials
-# ---------------------------------------------------------------------------
-if [[ -z "${PENTEST_USER_A_EMAIL:-}" ]]; then
-  fail "PENTEST_USER_A_EMAIL is not set. Set it in .env or the environment."
-fi
-if [[ -z "${PENTEST_USER_A_PASSWORD:-}" ]]; then
-  fail "PENTEST_USER_A_PASSWORD is not set. Set it in .env or the environment."
-fi
-
-# ---------------------------------------------------------------------------
 # Resolve PROFILE to absolute path if provided
 # ---------------------------------------------------------------------------
 if [[ -n "$PROFILE" ]]; then
@@ -297,22 +375,31 @@ if [[ -n "$PROFILE" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Resolve the effective target URL (used by reachability + discovery)
+# Export the effective target URL (used by reachability + discovery)
 # ---------------------------------------------------------------------------
-# Use TARGET_BASE_URL override if set, otherwise the CLI arg.
-EFFECTIVE_TARGET="${TARGET_BASE_URL:-$TARGET_URL}"
+# EFFECTIVE_TARGET was resolved ONCE at the confirmation gate above (TARGET_BASE_URL
+# override, else the CLI arg) and is reused verbatim here, so the host that was
+# gated is provably the host that gets scanned.
 export PENTEST_TARGET_URL="$EFFECTIVE_TARGET"
 
 # ---------------------------------------------------------------------------
-# Pre-flight: Target reachable
+# Pre-flight: delegate to doctor.py
 # ---------------------------------------------------------------------------
-# Checked BEFORE discovery so a down/unreachable target fails with a clear
-# "Target not reachable" rather than a misleading "Discovery failed".
-info "Checking target reachability: $EFFECTIVE_TARGET"
-if ! curl -sf --max-time 10 "$EFFECTIVE_TARGET" > /dev/null 2>&1; then
-  fail "Target not reachable: $EFFECTIVE_TARGET"
+# doctor.py owns the preflight checks (Python version, all four PENTEST_USER_*
+# credentials, target reachability, User A login, User B login), printing one
+# [PASS]/[FAIL] line per check and halting at the first failure. Run BEFORE
+# discovery so a broken environment fails with an actionable message rather
+# than a misleading "Discovery failed". Any doctor failure (it exits 10-19)
+# maps to the single fixed preflight exit (10), never aggregate's 0/1/2/3.
+info "Running preflight checks (doctor.py)..."
+_DOCTOR_ARGS=("$EFFECTIVE_TARGET")
+if [[ -n "$PROFILE" ]]; then
+  _DOCTOR_ARGS+=(--profile "$PROFILE")
 fi
-info "Target reachable."
+if ! "$PYTHON_BIN" doctor.py "${_DOCTOR_ARGS[@]}"; then
+  fail_preflight "Preflight failed — fix the [FAIL] check above and re-run. (Reproduce with: python doctor.py $EFFECTIVE_TARGET)"
+fi
+info "Preflight passed."
 
 # ---------------------------------------------------------------------------
 # Discovery + profile assembly (ONE live crawl, frozen for the whole run)
@@ -438,6 +525,25 @@ case "$SIGNIN_AUTH_TYPE" in
     fail "Sign-in returned unrecognized auth type: '$SIGNIN_AUTH_TYPE'."
     ;;
 esac
+
+# user_b sign-in check: cross-user (IDOR) probes silently skip without a
+# working user_b, which reads as "passed". Verify it can authenticate NOW,
+# against the same frozen profile, so a dead User B aborts the run instead.
+# (No token is exported — ZAP scans as user_a; pytest re-authenticates user_b
+# via conftest's adapter.)
+info "Verifying user_b sign-in..."
+"$PYTHON_BIN" -c "
+import sys, os
+sys.path.insert(0, '.')
+from profile import load_profile
+from auth import create_adapter
+profile = load_profile(os.environ['PENTEST_PROFILE'])
+adapter = create_adapter(profile)
+headers = adapter.get_headers('user_b')
+if not headers:
+    raise SystemExit('adapter returned no auth headers for user_b')
+" || fail "user_b sign-in failed — cross-user (IDOR) probes need a working User B. Check PENTEST_USER_B_EMAIL / PENTEST_USER_B_PASSWORD."
+info "Sign-in OK — user_b authenticated."
 
 # ---------------------------------------------------------------------------
 # Pre-flight: Key endpoint spot-check

@@ -27,8 +27,48 @@ heredoc exactly (including non-zero exit on a missing requestor job so the
 from __future__ import annotations
 
 import json
+import re
+
+from exclusions import effective_exclude_paths, is_excluded_path
 
 NIL_UUID = "00000000-0000-0000-0000-000000000000"
+
+
+def zap_exclude_regexes(profile_data, *, base_token="${TARGET_BASE_URL}"):
+    """Build ZAP context excludePaths regexes from the profile's exclude_paths.
+
+    The requestor seam (build_requestor_requests) only stops ZAP from being
+    *seeded* with an excluded endpoint — but the spider crawls public links and
+    activeScan attacks whatever lands in the context, so a linked /logout (or a
+    token-rotation path) would still be probed and could destroy the
+    authenticated session mid-scan. These regexes add those paths to the
+    context excludePaths so the spider and active scanner skip them too.
+
+    ``${TARGET_BASE_URL}`` is kept LITERAL (ZAP substitutes it at scan time),
+    mirroring the static-asset exclusions already in the plan. Each pattern is
+    a full-URL match anchored directly after the base —
+    ``<base><path>(?:[/?]...)?`` — so it excludes exactly the root-anchored,
+    segment-boundary set that ``exclusions.is_excluded_path`` excludes at the
+    pytest/discovery seams: a sub-path or query is covered
+    (``/logout`` -> ``/logout/all``), a sibling is not over-excluded
+    (``/reset-password`` does NOT match ``/reset-password-help`` or a nested
+    ``/api/reset-password``).
+
+    The leading ``(?i)`` is load-bearing: ZAP compiles these with
+    ``java.util.regex`` which matches case-SENSITIVELY, but the path filter is
+    case-insensitive (``_normalize_path`` lowercases). Without it the spider
+    could crawl ``/Logout`` while the lowercased exclusion silently misses it.
+    """
+    patterns = []
+    for path in effective_exclude_paths((profile_data or {}).get("exclude_paths")):
+        if path == "/":
+            # A root exclusion compiles to a catch-all that would match every
+            # URL and silently disable the whole scan. Skip it here (the pytest
+            # /discovery seams still exclude the literal root path); a bare "/"
+            # exclude_path is almost certainly an operator mistake.
+            continue
+        patterns.append(f"(?i){base_token}{re.escape(path)}(?:[/?].*)?")
+    return patterns
 
 
 class RequestorJobNotFound(Exception):
@@ -49,6 +89,12 @@ def build_requestor_requests(profile_data, *, base_token="${TARGET_BASE_URL}"):
     base = base_token  # ZAP env-substitution token, kept literal
     prefix = ((data.get('target') or {}).get('api_prefix') or '/.netlify/functions').rstrip('/')
     endpoints = data.get('endpoints') or {}
+    # Default-on probe exclusions (shared filter — same rules as the pytest
+    # enumeration seam and discover.py, so no seam leaks an excluded path).
+    exclude_paths = effective_exclude_paths(data.get('exclude_paths'))
+
+    def excluded(path):
+        return is_excluded_path(str(path), exclude_paths)
 
     def resolve(v):
         if isinstance(v, str):
@@ -96,19 +142,19 @@ def build_requestor_requests(profile_data, *, base_token="${TARGET_BASE_URL}"):
     requests = []
     for cat in ('authenticated', 'payment', 'internal'):
         for ep in (endpoints.get(cat) or []):
-            if isinstance(ep, dict) and ep.get('path'):
+            if isinstance(ep, dict) and ep.get('path') and not excluded(ep['path']):
                 requests.append(req(ep['path'], ep.get('method', 'POST'), bearer, body_for(ep)))
     for ep in (endpoints.get('anonymous') or []):
-        if isinstance(ep, dict) and ep.get('path'):
+        if isinstance(ep, dict) and ep.get('path') and not excluded(ep['path']):
             requests.append(req(ep['path'], ep.get('method', 'POST'), anon, body_for(ep)))
     for ep in (endpoints.get('webhook') or []):
-        if isinstance(ep, dict) and ep.get('path'):
+        if isinstance(ep, dict) and ep.get('path') and not excluded(ep['path']):
             requests.append(
                 req(ep['path'], ep.get('method', 'POST'), webhook_headers(ep.get('signature')), body_for(ep))
             )
     # Upload endpoint (file-upload abuse surface) — seeded as an anon CSV POST.
     uploads = data.get('uploads') or {}
-    if isinstance(uploads, dict) and uploads.get('endpoint'):
+    if isinstance(uploads, dict) and uploads.get('endpoint') and not excluded(uploads['endpoint']):
         requests.append(
             req(
                 uploads['endpoint'],
@@ -120,12 +166,32 @@ def build_requestor_requests(profile_data, *, base_token="${TARGET_BASE_URL}"):
     return requests
 
 
-def inject_into_plan(plan_dict, requests):
+def inject_exclude_paths(plan_dict, exclude_regexes):
+    """Append ``exclude_regexes`` to every context's ``excludePaths`` in place.
+
+    Idempotent: a regex already present is not duplicated (so re-running the
+    builder on an already-injected plan is a no-op). Returns ``plan_dict``.
+    """
+    if not exclude_regexes:
+        return plan_dict
+    for context in ((plan_dict.get('env') or {}).get('contexts') or []):
+        existing = context.setdefault('excludePaths', [])
+        for rx in exclude_regexes:
+            if rx not in existing:
+                existing.append(rx)
+    return plan_dict
+
+
+def inject_into_plan(plan_dict, requests, exclude_regexes=None):
     """Inject ``requests`` into the ``requestor`` job of ``plan_dict``.
+
+    Also appends ``exclude_regexes`` to every context's ``excludePaths`` so the
+    spider and active scanner honor the same exclusions as the requestor seam.
 
     Mutates and returns ``plan_dict``. Raises ``RequestorJobNotFound`` when no
     ``requestor`` job exists (mirrors the heredoc's ``sys.exit`` at run.sh:728).
     """
+    inject_exclude_paths(plan_dict, exclude_regexes or [])
     for job in plan_dict.get('jobs', []):
         if job.get('type') == 'requestor':
             job['requests'] = requests
@@ -145,11 +211,12 @@ if __name__ == "__main__":
     profile = load_profile(os.environ['PENTEST_PROFILE'])
     data = profile.raw()
     requests = build_requestor_requests(data)
+    exclude_regexes = zap_exclude_regexes(data)
 
     with open('zap/automation-plan.yaml') as f:
         plan = yaml.safe_load(f)
     try:
-        inject_into_plan(plan, requests)
+        inject_into_plan(plan, requests, exclude_regexes)
     except RequestorJobNotFound as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)

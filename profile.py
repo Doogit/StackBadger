@@ -187,6 +187,21 @@ def load_profile(path: str | Path) -> Profile:
     if not isinstance(target, dict) or not target.get("base_url"):
         raise ValueError("Profile is missing required field: target.base_url")
 
+    # Validate optional probe-exclusion fields: must be lists of strings when
+    # present. (No emptiness check — the effective list is always the union
+    # with the defaults; see exclusions.py.)
+    for _excl_field in ("exclude_paths", "exclude_tables"):
+        _excl_val = data.get(_excl_field)
+        if _excl_val is None:
+            continue
+        if not isinstance(_excl_val, list) or not all(
+            isinstance(item, str) for item in _excl_val
+        ):
+            raise ValueError(
+                f"Profile field '{_excl_field}' must be a list of strings, "
+                f"got {type(_excl_val).__name__}"
+            )
+
     # Warn if source_file_map references endpoints not declared in the profile.
     import warnings as _warnings
 
