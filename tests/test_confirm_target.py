@@ -63,10 +63,10 @@ def test_no_subdomain_cross_match(sandbox):
 
 
 def test_gate_uses_cli_host_not_a_different_confirm_value(sandbox):
-    # The contract is the CLI host: confirming a DIFFERENT host (e.g. the www
-    # form of an apex you passed) is refused, and the refusal names the CLI host
-    # the operator must confirm. This pins the "CLI host, not post-redirect host"
-    # contract so the documented guidance and the code cannot drift apart.
+    # The contract is the effective-target host: confirming a DIFFERENT host
+    # (e.g. the www form of an apex you passed) is refused, and the refusal
+    # names the host the operator must confirm. This pins the "effective host,
+    # not post-redirect host" contract so docs and code cannot drift apart.
     result = run_sh(
         sandbox,
         ["https://stub.invalid"],
@@ -75,6 +75,42 @@ def test_gate_uses_cli_host_not_a_different_confirm_value(sandbox):
     assert result.returncode == 10
     assert "CONFIRM_TARGET gate refused" in result.stderr
     assert f"export CONFIRM_TARGET={HOST}" in result.stderr  # names the CLI host
+
+
+def test_target_base_url_override_drives_gate_host(sandbox):
+    # TARGET_BASE_URL overrides the CLI arg as the effective target, so the gate
+    # must confirm the OVERRIDE host, and the CLI arg's host must be refused.
+    # Pins gate-host == scan-host under the documented TARGET_BASE_URL override.
+    override_host = "override.invalid"
+
+    # Confirming the override host proceeds (and the run scans the override).
+    stub_doctor(sandbox, 0)
+    ok = run_sh(
+        sandbox,
+        ["https://stub.invalid"],
+        env_overrides={
+            "TARGET_BASE_URL": "https://override.invalid",
+            "CONFIRM_TARGET": override_host,
+            "CONFIRM_AUTHORIZED": override_host,
+        },
+    )
+    combined = ok.stdout + ok.stderr
+    assert "gate refused" not in combined
+    assert f"gates passed for host: {override_host}" in combined
+
+    # Confirming the CLI arg's host (not the override) is refused.
+    bad = run_sh(
+        sandbox,
+        ["https://stub.invalid"],
+        env_overrides={
+            "TARGET_BASE_URL": "https://override.invalid",
+            "CONFIRM_TARGET": HOST,
+            "CONFIRM_AUTHORIZED": HOST,
+        },
+    )
+    assert bad.returncode == 10
+    assert "CONFIRM_TARGET gate refused" in bad.stderr
+    assert f"export CONFIRM_TARGET={override_host}" in bad.stderr
 
 
 def test_scheme_case_port_insensitive_match_proceeds(sandbox):

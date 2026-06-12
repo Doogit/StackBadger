@@ -228,27 +228,34 @@ trap _cleanup_on_exit EXIT INT TERM
 #   CONFIRM_TARGET     — "this is the right host" (typo/wrong-env guard)
 #   CONFIRM_AUTHORIZED — "a human affirmed authorization to test this host"
 #
-# Each must EXACT-match the host of the URL you pass to run.sh
-# (scheme/case/port-insensitive, NO subdomain cross-match:
-# api.example.com != example.com). The gate compares the CLI host, NOT a
-# post-redirect host: the gate runs before any network contact (so it cannot,
-# and must not, resolve a redirect against an unconfirmed/unauthorized host),
-# and the probe traffic's origin of record is the CLI host anyway
-# (assemble_profile pins target.base_url to the CLI arg). So if your site
-# redirects apex -> www and you want to test the www host, pass the www URL
-# (./run.sh https://www.example.com) and confirm www.example.com. The values
-# are meant to be set by the HUMAN out-of-band — an agent following LAUNCH.md
-# must not set CONFIRM_AUTHORIZED for itself. --yes (AUTO_YES) does NOT bypass
-# either gate. localhost / 127.0.0.1 / [::1] are exempt. Placed before the
-# branch-DB lifecycle so a refused run performs zero remote side effects.
+# Each must EXACT-match the host of the EFFECTIVE TARGET — the URL this run
+# will actually scan (scheme/case/port-insensitive, NO subdomain cross-match:
+# api.example.com != example.com). The effective target is the URL you pass to
+# run.sh, OR the TARGET_BASE_URL env override when that is set (TARGET_BASE_URL
+# wins over the CLI arg, same as the scan target below). Confirming and
+# scanning are the SAME resolved value (EFFECTIVE_TARGET), so the gate can
+# never confirm one host and scan another.
 #
-# SCOPE: the gate governs the application host (the URL you point run.sh at).
-# Discovery harvests the target's Supabase project URL from its JS bundle, and
-# PostgREST/IDOR/RLS probes hit that <ref>.supabase.co backend — which is
-# implicitly in scope as the target's own backend. Confirm you are authorized
-# to test the whole deployment, not just the front-end host, before proceeding.
-_GATE_TARGET="${TARGET_BASE_URL:-$TARGET_URL}"
-_TARGET_HOST="$(_normalize_host "$_GATE_TARGET")"
+# It is NOT a post-redirect host: the gate runs before any network contact (so
+# it cannot, and must not, resolve a redirect against an unconfirmed/
+# unauthorized host), and discovery pins target.base_url to this same value
+# anyway. So to test the www host of an apex that redirects, pass/override the
+# www URL and confirm www.example.com. The values are meant to be set by the
+# HUMAN out-of-band — an agent following LAUNCH.md must not set
+# CONFIRM_AUTHORIZED for itself. --yes (AUTO_YES) does NOT bypass either gate.
+# localhost / 127.0.0.1 / [::1] are exempt. Placed before the branch-DB
+# lifecycle so a refused run performs zero remote side effects.
+#
+# SCOPE: the gate governs the application host. Discovery harvests the target's
+# Supabase project URL from its JS bundle, and PostgREST/IDOR/RLS probes hit
+# that <ref>.supabase.co backend — which is implicitly in scope as the target's
+# own backend. Confirm you are authorized to test the whole deployment, not
+# just the front-end host, before proceeding.
+#
+# EFFECTIVE_TARGET is resolved ONCE here and reused for reachability/discovery
+# below, so the gated host and the scanned host are guaranteed identical.
+EFFECTIVE_TARGET="${TARGET_BASE_URL:-$TARGET_URL}"
+_TARGET_HOST="$(_normalize_host "$EFFECTIVE_TARGET")"
 if [[ "$_TARGET_HOST" != "localhost" && "$_TARGET_HOST" != "127.0.0.1" && "$_TARGET_HOST" != "[::1]" ]]; then
   if [[ -z "${CONFIRM_TARGET:-}" || "$(_normalize_host "${CONFIRM_TARGET:-}")" != "$_TARGET_HOST" ]]; then
     fail_preflight "CONFIRM_TARGET gate refused: this run would scan '$_TARGET_HOST'. To confirm the target, run:  export CONFIRM_TARGET=$_TARGET_HOST  (exact host match required; --yes does not bypass this gate)"
@@ -368,10 +375,11 @@ if [[ -n "$PROFILE" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Resolve the effective target URL (used by reachability + discovery)
+# Export the effective target URL (used by reachability + discovery)
 # ---------------------------------------------------------------------------
-# Use TARGET_BASE_URL override if set, otherwise the CLI arg.
-EFFECTIVE_TARGET="${TARGET_BASE_URL:-$TARGET_URL}"
+# EFFECTIVE_TARGET was resolved ONCE at the confirmation gate above (TARGET_BASE_URL
+# override, else the CLI arg) and is reused verbatim here, so the host that was
+# gated is provably the host that gets scanned.
 export PENTEST_TARGET_URL="$EFFECTIVE_TARGET"
 
 # ---------------------------------------------------------------------------

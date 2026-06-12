@@ -38,7 +38,8 @@ variables yourself, and do not proceed until the user confirms they have set the
 > ```
 >
 > No subdomain cross-match (`api.example.com` != `example.com`). Use the host of
-> the URL you pass to `run.sh` — not a post-redirect host. If the site redirects
+> the effective target — the URL you pass to `run.sh` (or `TARGET_BASE_URL` if
+> that override is set) — not a post-redirect host. If the site redirects
 > apex -> www and you want to test www, pass the www URL and confirm
 > `www.example.com`. Only do this for systems you own or are explicitly
 > authorized, in writing, to test.
