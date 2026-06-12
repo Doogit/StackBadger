@@ -155,7 +155,7 @@ def test_target_reachable_passes_on_any_http_response(monkeypatch):
 
 def test_user_b_failure_names_user_b(monkeypatch):
     adapter = _FakeAdapter(ok_accounts=("user_a",))
-    monkeypatch.setattr(doctor, "_build_adapter", lambda url, prof: (adapter, "clerk"))
+    monkeypatch.setattr(doctor, "_build_adapter", lambda url, prof: (adapter, "clerk", None))
     results = doctor.check_logins(TARGET, None)
     assert [r.name for r in results] == ["user-a-login", "user-b-login"]
     assert results[0].passed
@@ -228,7 +228,7 @@ def test_happy_path_all_pass_exit_zero(tmp_path, monkeypatch):
         lambda url: doctor.CheckResult("target-reachable", True, "HTTP 200"),
     )
     monkeypatch.setattr(
-        doctor, "_build_adapter", lambda url, prof: (_FakeAdapter(), "supabase-auth")
+        doctor, "_build_adapter", lambda url, prof: (_FakeAdapter(), "supabase-auth", None)
     )
     exit_code, results = doctor.run_doctor(
         TARGET,

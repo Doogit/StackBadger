@@ -546,6 +546,61 @@ if not headers:
 info "Sign-in OK — user_b authenticated."
 
 # ---------------------------------------------------------------------------
+# Auth verify_path fast-fail (optional, profile-driven)
+# ---------------------------------------------------------------------------
+# When the profile declares auth.verify_path — an API-LAYER route that returns
+# 401/403 to unauthenticated callers (PostgREST endpoint / auth-checked
+# function), NOT a CDN-cached page that 200s anonymously — request it with
+# EACH account's credential now. A 401/403 here means the provider issued a
+# token the target API rejects: a broken account or, more often, the WRONG
+# stack.auth adapter. Failing now beats discovering it as 50 skipped tests
+# later. Unset -> warn + skip (black-box safe). Exits 10 (preflight), never
+# aggregate's 0/1/2/3.
+info "Checking auth.verify_path (if set)..."
+"$PYTHON_BIN" -c "
+import sys, os
+sys.path.insert(0, '.')
+import httpx
+from profile import load_profile
+from auth import create_adapter
+
+profile = load_profile(os.environ['PENTEST_PROFILE'])
+verify_path = (profile.auth and profile.auth.verify_path) or ''
+if not verify_path:
+    print('[verify-path] auth.verify_path not set — skipping the pre-scan auth verification (black-box mode).', file=sys.stderr)
+    raise SystemExit(0)
+base_url = os.environ.get('TARGET_BASE_URL') or (profile.target and profile.target.base_url) or ''
+url = base_url.rstrip('/') + verify_path
+adapter = create_adapter(profile)
+failures = []
+try:
+    for account in ('user_a', 'user_b'):
+        headers = adapter.get_headers(account)
+        resp = httpx.get(url, headers=headers, timeout=15.0, follow_redirects=True)
+        if 200 <= resp.status_code < 300:
+            print(f'[verify-path] {account}: {verify_path} -> HTTP {resp.status_code} OK', file=sys.stderr)
+        elif resp.status_code in (401, 403):
+            failures.append(
+                f'{account}: {verify_path} -> HTTP {resp.status_code}. The provider issued a '
+                f'credential the API rejects — either the {account} account is broken in the '
+                'target app, or stack.auth selects the WRONG adapter (token from the wrong '
+                'issuer). Fix stack.auth (LAUNCH.md Step 0) or the account.'
+            )
+        else:
+            print(
+                f'[verify-path] {account}: {verify_path} -> HTTP {resp.status_code} — inconclusive '
+                '(expected 2xx). Is auth.verify_path an API-layer route? Continuing.',
+                file=sys.stderr,
+            )
+finally:
+    if hasattr(adapter, 'close'):
+        adapter.close()
+for f in failures:
+    print('[verify-path] FAIL ' + f, file=sys.stderr)
+raise SystemExit(1 if failures else 0)
+" || fail_preflight "auth.verify_path check failed — see the [verify-path] FAIL lines above."
+
+# ---------------------------------------------------------------------------
 # Pre-flight: Key endpoint spot-check
 # ---------------------------------------------------------------------------
 info "Spot-checking key endpoints..."
