@@ -2,16 +2,21 @@
 
 > _Badger your stack before someone else does._
 
-StackBadger is a portable, profile-driven **black-box offensive security harness**. It attacks a live web
-application the way an external attacker would — discovering all the configuration it needs from
-the deployed client bundle, signing in as a real user, and running a pytest suite of auth-bypass,
-IDOR, access-control, injection, and misconfiguration probes — then merges the results (plus an
-optional ZAP DAST scan) into HTML and JSON reports.
+StackBadger is a portable, profile-driven **black-box offensive security harness**: point it at a
+deployed web app's URL, give it two test accounts, and it attacks the app the way an external
+attacker would — discovering configuration from the deployed client bundle, signing in as a real
+user, and running a pytest suite of auth-bypass, IDOR, access-control, injection, and
+misconfiguration probes — then merges the results (plus an optional ZAP DAST scan) into HTML and
+JSON reports.
 
-**No server-side secrets required.** Point it at a URL, give it two test accounts, and run. The
-one-command `./run.sh` flow works for any supported stack — auto-discovering a Clerk + Supabase +
-Stripe target, or signing in via the adapter named in a profile — see
-[What makes it portable](#what-makes-it-portable).
+The mechanism that does the work is the **two-account design**: two pre-authenticated test
+accounts are wired into every probe, so cross-user assertions ("can User B read User A's
+resources?") are built into the suite itself — no manual token injection, no scripted login
+macros, and the credentials refresh automatically for the duration of the run. **No server-side
+secrets are required for the scan**: everything the harness consumes at runtime is what an
+external attacker could already see. The one-command `./run.sh` flow works for any supported
+stack — auto-discovering a Clerk + Supabase + Stripe target, or signing in via the adapter named
+in a profile — see [What makes it portable](#what-makes-it-portable).
 
 ## Responsible use / authorization required
 
@@ -35,6 +40,86 @@ post-redirect host. `CONFIRM_AUTHORIZED` must be set by the site owner out-of-ba
 an AI agent running the harness must never set it for itself — and `--yes` does
 not bypass either gate. See `.env.example` for the exact format.
 
+## Prerequisites
+
+- Python 3.11 or later, and pip
+- Two test accounts in the target's auth system — for Supabase Auth,
+  [`provision_accounts.py`](#test-accounts--provisioning) creates them for you
+- A live or staging deployment of the target
+- Docker (optional — only for the ZAP DAST scan)
+
+## Quickstart
+
+Five steps from a fresh clone to a report (all commands run from the repository root):
+
+```bash
+# 0. One-time setup
+git clone https://github.com/Doogit/StackBadger.git && cd StackBadger
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -e .
+
+# 1. Copy the env template
+cp .env.example .env
+
+# 2. Add the two test accounts to .env — by hand (see "Test accounts &
+#    provisioning"), or for Supabase Auth let the script create confirmed
+#    accounts and write .env for you (needs SUPABASE_SERVICE_ROLE_KEY):
+python provision_accounts.py --provider supabase-auth
+
+# 3. Confirm the target and your authorization (human-set, machine-enforced):
+export CONFIRM_TARGET=your-site.com
+export CONFIRM_AUTHORIZED=your-site.com
+
+# 4. Preflight — every check must PASS before any scan traffic fires:
+python doctor.py https://your-site.com
+
+# 5. Run (read-only by default; drop --skip-zap if Docker is available):
+./run.sh https://your-site.com --skip-zap
+```
+
+Afterwards, if step 2 provisioned accounts, remove them: `python teardown.py`.
+
+Add `--profile profiles/<name>.yaml` to name a non-default stack —
+**required for Supabase Auth targets** (see
+[Which auth provider — what you need](#which-auth-provider--what-you-need)) — and to unlock the
+endpoint-specific probes. Run the full suite including ZAP with
+`./run.sh https://your-site.com`, or pass `--full`/`--branch` for write probes (see
+[Modes](#modes)).
+
+### Driving it with an AI agent
+
+StackBadger is designed to be driven by an AI coding agent. After step 0 above, open Claude Code
+in this directory and paste:
+
+```
+Follow LAUNCH.md to run a security test against https://your-site.com
+```
+
+The agent gathers credentials, provisions accounts if needed, runs the preflight, executes the
+suite, and summarizes the report. `LAUNCH.md` is the full agent runbook with gated steps —
+authorization (`CONFIRM_*`) must still be set by **you**, out-of-band; the agent is instructed
+never to set it for itself.
+
+## Which auth provider — what you need
+
+`stack.auth` selects the sign-in adapter. What each provider needs:
+
+| `stack.auth` | Sign-in flow | Required inputs | Detected from the bundle? |
+|---|---|---|---|
+| `clerk` | Clerk FAPI password sign-in (Bearer JWT) | Clerk FAPI host (auto-discovered) + the four `PENTEST_USER_*` values | Yes (also the no-profile default) |
+| `firebase` | Identity Toolkit password sign-in (Bearer JWT) | Firebase API key (auto-discovered) + credentials | Yes |
+| `supabase-auth` | GoTrue password grant (Bearer JWT) | Supabase project URL + anon key (auto-discovered) + credentials | **No — must be named in a profile** |
+| `nextauth` | Credentials-provider callback (session cookie) | Target base URL + credentials | Yes |
+
+> **The Supabase-Auth caveat, up front:** `supabase-js` statically bundles the GoTrue auth client
+> even for database-only use, so a bundle scan **cannot** distinguish a Supabase-Auth target from
+> a Clerk-auth + Supabase-database target — auto-discovery will never select `supabase-auth`.
+> Name it explicitly (`stack.auth: supabase-auth` in a profile, e.g.
+> `profiles/supabase-auth-example.yaml`), or — if you have the target's source — run
+> `python discover.py /path/to/source` (LAUNCH.md Step 0), which detects the active provider from
+> dependencies and auth-API usage and writes the profile for you.
+
 ## What makes it portable
 
 StackBadger's pytest suite is **stack-agnostic**: it ships auth adapters and attack modules for a range
@@ -53,72 +138,10 @@ Clerk + Supabase + Stripe stack, let live discovery fill it in). Supported:
 sign-in → optional ZAP → report). With no profile it auto-discovers a Clerk + Supabase + Stripe
 target; add `--profile <file>.yaml` to target any other stack — the orchestrator signs in via the
 adapter named in `stack.auth` (Clerk / Firebase / Supabase Auth / NextAuth). NextAuth uses cookie
-auth, so the optional ZAP scan (which seeds a Bearer header) is skipped on that path; every
-supported stack otherwise runs end-to-end.
+auth, so ZAP is seeded with the session cookie instead of a Bearer header; every supported stack
+runs end-to-end.
 
 Adding a new target is a YAML profile. See [Adding a new target](#adding-a-new-target).
-
----
-
-## Fastest path: one prompt in Claude Code
-
-StackBadger is designed to be driven by an AI coding agent. **Clone it, do the one-time setup below,
-then open Claude Code in this directory and paste a single prompt.**
-
-```
-Follow LAUNCH.md to run a security test against https://your-site.com
-```
-
-Claude will: gather your test-account credentials, run pre-flight checks, discover the target's
-public config, execute the suite via `./run.sh` (adding `--profile` for non-default stacks), and
-summarize the report — no file editing required.
-`LAUNCH.md` contains the full agent runbook.
-
-### One-time setup (required before the prompt)
-
-```bash
-# 1. Clone and enter the directory
-git clone https://github.com/Doogit/StackBadger.git
-cd StackBadger
-
-# 2. Create a virtual environment
-python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-
-# 3. Install
-pip install -e .
-
-# 4. Add two test-account credentials
-cp .env.example .env
-# Edit .env — email + password for two test accounts (see "Test accounts" below)
-```
-
-That's it. Now run the Claude Code prompt above, or use the manual CLI below.
-
-> All commands below assume you are inside the StackBadger directory (the repository root).
-
----
-
-## Manual quick start
-
-`./run.sh` automates the full flow. With no profile it auto-discovers a Clerk + Supabase + Stripe
-target and signs in via Clerk; add `--profile` to target any supported stack (the adapter named in
-`stack.auth` handles sign-in) and to unlock the endpoint-specific probes.
-
-```bash
-# Black-box run — assumes Clerk + Supabase + Stripe; config auto-discovered from the live bundle
-./run.sh https://your-site.com --skip-zap
-```
-
-```bash
-# Full suite including a ZAP DAST scan (requires Docker)
-./run.sh https://your-site.com
-```
-
-```bash
-# With a profile — any supported stack; signs in via the profile's stack.auth adapter
-./run.sh https://your-site.com --profile profiles/your-site.yaml
-```
 
 ## Running on other stacks
 
@@ -153,13 +176,6 @@ debugging a single module. The same `--full`/write-probe gating applies via mark
 TARGET_BASE_URL=https://your-site.com \
   python -m pytest tests/ --profile profiles/your-site.yaml -m "not write_probe" -v
 ```
-
-## Prerequisites
-
-- Python 3.11 or later, and pip
-- Two test accounts in the target's auth system (see [Test accounts](#test-accounts))
-- A live or staging deployment of the target
-- Docker (optional — only for the ZAP DAST scan)
 
 ## How it works
 
@@ -223,27 +239,71 @@ Auto-creates a disposable Supabase branch database, runs the full suite against 
 branch afterward — even on failure or Ctrl-C. Requires `SUPABASE_ACCESS_TOKEN`. The safest way to
 run write probes. (Supabase-only; other databases use `--full` against a staging target.)
 
-## Test accounts
+## Test accounts & provisioning
 
 StackBadger needs **two separate user accounts** in the target's auth system, used for cross-user
-(IDOR) probes:
+(IDOR) probes. The invariants for both accounts, whatever the provider:
 
-1. In your target's auth provider — **Clerk**, **Firebase Auth**, **Supabase Auth**, or a
-   **NextAuth credentials** provider — create two users with **email + password** sign-in enabled.
-2. Disable **MFA** on both accounts (headless sign-in cannot complete a TOTP/SMS challenge; StackBadger
-   detects MFA and skips with a clear error).
-3. For the strongest coverage, ensure each account owns at least one real resource (an uploaded
-   file, a document, a row) so positive-control checks can confirm a probe's baseline.
-4. Set the credentials in `.env`:
-   ```bash
-   PENTEST_USER_A_EMAIL=pentest-a@example.com
-   PENTEST_USER_A_PASSWORD=...
-   PENTEST_USER_B_EMAIL=pentest-b@example.com
-   PENTEST_USER_B_PASSWORD=...
-   ```
+- **Email + password** sign-in enabled, and the email **confirmed/verified** (an unconfirmed
+  account cannot sign in headlessly).
+- **MFA disabled** (headless sign-in cannot complete a TOTP/SMS challenge; StackBadger detects MFA
+  and skips with a clear error).
+- For the strongest coverage, each account should own at least one real resource (an uploaded
+  file, a document, a row) so positive-control checks can confirm a probe's baseline.
 
 StackBadger signs in via the provider's public sign-in API, acquires tokens, and refreshes them for the
 duration of the run. No manual token rotation.
+
+### Supabase Auth — scripted
+
+```bash
+python provision_accounts.py --provider supabase-auth
+```
+
+Creates both accounts via the GoTrue **Admin API** (`POST /auth/v1/admin/users` with
+`email_confirm: true`) and writes the credentials plus the created user IDs into `.env`
+(mode `0600`). It needs the project **service-role key** (`SUPABASE_SERVICE_ROLE_KEY` in `.env`;
+see `.env.example`). `SUPABASE_ACCESS_TOKEN` — the Management API token used by `--branch` — can
+**not** call the Admin API; the script only uses it, optionally, to fetch the service-role key.
+Re-running is idempotent, and the key is never echoed.
+
+> **Do not seed accounts with raw SQL** (`INSERT INTO auth.users ...`): GoTrue scans NULL token
+> columns into non-nullable strings and every subsequent login fails with
+> `500 "Database error querying schema"` ([supabase/auth#1940](https://github.com/supabase/auth/issues/1940)).
+> The Admin API populates those columns correctly — that is why the script exists.
+
+### Clerk / Firebase / NextAuth — manual (dashboard)
+
+`python provision_accounts.py --provider clerk` (or `firebase` / `nextauth`) prints these steps;
+in short:
+
+- **Clerk:** Dashboard → Users → Create user, twice; enable email + password; mark the email
+  verified; MFA off.
+- **Firebase:** Console → Authentication → Users → Add user, twice; the Email/Password provider
+  must be enabled; no MFA enrollment.
+- **NextAuth:** credentials providers are app-defined — create two users through the target app's
+  own sign-up flow (or its admin tooling); MFA off.
+
+Then set the credentials in `.env`:
+
+```bash
+PENTEST_USER_A_EMAIL=pentest-a@example.com
+PENTEST_USER_A_PASSWORD=...
+PENTEST_USER_B_EMAIL=pentest-b@example.com
+PENTEST_USER_B_PASSWORD=...
+```
+
+### Teardown — remove what you seeded
+
+```bash
+python teardown.py
+```
+
+Deletes the provisioned accounts by the user IDs stored in `.env` and clears them. Idempotent —
+re-running (or running with nothing provisioned) is a no-op. Run it after every provisioned run:
+the seeded accounts are real, confirmed users in the target's auth system and must not outlive the
+test. Branch databases are cleaned up separately by `run.sh`'s exit trap; manually-created
+accounts are deleted the same way they were created (dashboard).
 
 ## Environment variables
 
@@ -252,7 +312,9 @@ duration of the run. No manual token rotation.
 | `PENTEST_USER_A_EMAIL` / `_PASSWORD` | Yes | Test account A. |
 | `PENTEST_USER_B_EMAIL` / `_PASSWORD` | Yes (IDOR tests) | Test account B (cross-user probes). |
 | `TARGET_BASE_URL` | No | Overrides the target URL CLI argument. |
-| `SUPABASE_ACCESS_TOKEN` | No | Supabase Management API token — required only for `--branch`. |
+| `SUPABASE_ACCESS_TOKEN` | No | Supabase Management API token — required only for `--branch`. (It cannot call the GoTrue Admin API — see `SUPABASE_SERVICE_ROLE_KEY`.) |
+| `SUPABASE_SERVICE_ROLE_KEY` | No | Project service-role key — required only by `provision_accounts.py` / `teardown.py` (the Admin API accepts nothing else). Never echoed; keep it out of transcripts. |
+| `PENTEST_USER_A_ID` / `_B_ID` | No | Written by `provision_accounts.py`; used by `teardown.py` to delete by ID. |
 | `PENTEST_INTERNAL_SECRET` | No | Internal-endpoint authorization secret, for internal-endpoint tests. |
 | `PENTEST_USER_A_JWT` / `_B_JWT` | No | Pre-obtained token used as a fallback when live sign-in is unreachable or fails (at startup or mid-run). Live sign-in is attempted first. |
 
@@ -467,6 +529,13 @@ machinery itself and run without a live target.
 
 > In read-only mode, write-probe tests appear in the **skipped** count with reason
 > "Skipped in read-only mode (use --full to enable write probes)." This is expected.
+
+> **A skipped probe is not a passed probe.** Tests whose required config is missing — no endpoint
+> list, no table names, no provider block — **skip**, and a run with a thin or absent profile can
+> finish "clean" while having exercised very little. After every run, check the skipped count and
+> reasons in the report: skips citing missing profile fields mean those attack surfaces were
+> *never tested*, not that they are safe. Fill in the profile (endpoints, `supabase.tables`,
+> provider blocks) to convert skips into real probes.
 
 ### Exit codes
 

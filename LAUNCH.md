@@ -55,6 +55,11 @@ If the target URL was not already given in the prompt, ask for it. Then ask for 
 > Both accounts must exist in the target's auth provider (Clerk, Firebase, Supabase Auth, or a
 > NextAuth credentials provider), with email+password sign-in enabled and **MFA disabled**.
 
+If the accounts do **not** exist yet and the target uses **Supabase Auth**, offer to create them
+in Step 3a instead of asking for credentials. For Clerk / Firebase / NextAuth, the user must
+create them in the provider dashboard first — `python provision_accounts.py --provider clerk`
+(or `firebase` / `nextauth`) prints the steps.
+
 ### Step 1a: Authorization gate (human-set, machine-enforced)
 
 Authorization must be affirmed by the **human**, out-of-band — do NOT set these
@@ -136,6 +141,38 @@ PENTEST_USER_B_PASSWORD=<from user>
 EOF
 ```
 
+### Step 3a (alternative): Provision the accounts — Supabase Auth only
+
+If the user opted into account creation in Step 1, skip the manual `.env` write above and run:
+
+```bash
+python provision_accounts.py --provider supabase-auth
+```
+
+Requirements (ask the user to put them in `.env` — do NOT ask them to paste the key into the
+chat):
+
+- `SUPABASE_SERVICE_ROLE_KEY` — the project service-role key (Dashboard → Project Settings →
+  API keys). The Admin API accepts nothing else; `SUPABASE_ACCESS_TOKEN` only lets the script
+  *fetch* this key.
+- `SUPABASE_PROJECT_URL` — or pass `--project-url https://<ref>.supabase.co`.
+
+The script creates both accounts confirmed (`email_confirm: true` — never raw SQL, which breaks
+GoTrue logins), generates strong passwords, and writes all four `PENTEST_USER_*` values plus the
+created user IDs into `.env` with mode `0600`.
+
+> **Re-source `.env` before running anything else.** The credentials were written AFTER your
+> shell (and any earlier `source .env`) loaded the file. `run.sh` sources `.env` itself on
+> startup, but a `python doctor.py` or direct-pytest call from this same shell will not see the
+> new values until you re-source:
+>
+> ```bash
+> set -a; source .env; set +a
+> ```
+
+Gate: do not proceed until the script exits 0. If it fails, relay the error (it is already
+secret-redacted) and wait for the user.
+
 ### Step 4: Choose a profile (optional but recommended)
 
 StackBadger runs **with or without** a profile:
@@ -149,11 +186,8 @@ StackBadger runs **with or without** a profile:
 Decide which applies:
 
 1. **A profile already exists** for this target in `profiles/` → use it with `--profile`.
-2. **The user has the target's source code** → offer to auto-generate one:
-   ```bash
-   python discover.py /path/to/target-project --output profiles/<name>.yaml
-   ```
-   Then review the generated profile for `# TODO` placeholders before using it.
+2. **The user has the target's source code** → use the profile generated in Step 0 (or run it
+   now — see Step 0 for how to read the `[detect-auth]` verdict and when a confirm is required).
 3. **URL only, no profile** → run black-box (no `--profile` flag). Live discovery fingerprints the
    stack (Firebase and NextAuth are auto-detected; otherwise it defaults to Clerk + Supabase +
    Stripe). Supabase Auth shares Supabase's fingerprint and is not auto-detected as the auth
@@ -261,4 +295,17 @@ them from the known platform-dependent findings listed in the README.
 
 4. **Stack tested** — state the stack from the profile's `stack` block (or the Clerk + Supabase +
    Stripe default for a no-profile run), and note any test modules that skipped because their
-   provider was absent or config was missing.
+   provider was absent or config was missing. A skip for missing profile fields means that
+   surface was **never tested**, not that it passed — say so explicitly.
+
+### Step 8: Teardown (required if Step 3a provisioned accounts)
+
+```bash
+python teardown.py
+```
+
+Deletes the two seeded accounts by the user IDs stored in `.env` and clears them. Idempotent —
+safe to re-run. Gate: if it exits non-zero, relay which account is still standing and wait; the
+seeded accounts are real, confirmed users in the target's auth system and must not outlive the
+test. (Branch databases were already deleted by `run.sh`'s exit trap. If the accounts were
+created manually in a dashboard, delete them there instead.)
