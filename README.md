@@ -577,20 +577,22 @@ Confirm these against your own product decisions before treating them as defects
 
 ## Troubleshooting
 
-**Sign-in failed** — Check the `.env` credentials, confirm MFA is disabled on both accounts, and
-that the target is reachable. Live sign-in is attempted first; `PENTEST_USER_*_JWT` is used only as
-a fallback when sign-in is unreachable or fails. If the provider's bot protection blocks headless
-sign-in, resolve that (e.g. allowlist the IP) before running.
+First-run failures, mapped error → fix. Most of these surface as a `doctor.py` `[FAIL]` line or a
+`run.sh` exit `10` (see [Exit codes](#exit-codes)).
 
-**Docker not found** — ZAP is optional. Pass `--skip-zap`, or install Docker and
-`docker pull ghcr.io/zaproxy/zaproxy:stable`.
-
-**Rate limiting (429s)** — Run modules individually to reduce concurrency:
-`python -m pytest tests/test_injection.py --profile profiles/your-site.yaml -v`.
-
-**Profile not found** — The `--profile` path is relative to where you invoke `run.sh`. Run from the
-StackBadger directory or pass an absolute path.
-
-**Unsupported auth adapter** — `stack.auth` must be one of `clerk`, `firebase`, `supabase-auth`,
-`nextauth`. For other providers, supply `PENTEST_USER_*_JWT` tokens and the suite will run with the
-generic bearer flow where possible.
+| What you see | Why | Fix |
+|---|---|---|
+| `[FAIL] env-complete — missing PENTEST_USER_*` | A required credential is unset (User B is required for cross-user IDOR probes) | Copy `.env.example` to `.env` and fill in all four `PENTEST_USER_*` values |
+| `CONFIRM_TARGET gate refused` / `CONFIRM_AUTHORIZED gate refused` | The human-set confirmation vars don't exact-match the target host | `export CONFIRM_TARGET=<host>` and `export CONFIRM_AUTHORIZED=<host>` — bare host, exact match, no subdomain cross-match; `--yes` does not bypass |
+| `[FAIL] user-a-login` / `user-b-login` (sign-in failed) | Bad credentials, unconfirmed email, MFA enabled, or provider bot-protection blocking headless sign-in | Verify the account exists with email+password sign-in and a confirmed email; disable MFA; allowlist your IP if bot protection blocks sign-in. `PENTEST_USER_*_JWT` works as a fallback token |
+| Supabase login returns `500 "Database error querying schema"` | The account was seeded with raw SQL `INSERT INTO auth.users` — GoTrue chokes on its NULL token columns | Delete the broken user and recreate it with `python provision_accounts.py` (Admin API), never raw SQL |
+| Sign-in attempts Clerk against a Supabase-Auth site (e.g. `Clerk FAPI host not available`) | A bundle scan cannot detect Supabase Auth, so discovery defaults to Clerk | Name `stack.auth: supabase-auth` in a profile, or run the source scan (LAUNCH.md Step 0) to detect it |
+| `verify_path ... HTTP 401/403` right after a successful sign-in | The provider issued a token the target API rejects — wrong `stack.auth` adapter, or a broken account | Fix `stack.auth` (see the row above) or the account; also confirm `auth.verify_path` points at an API-layer route, not a page |
+| IDOR probes all skip or 404 | The test accounts own no resources, so there is nothing to cross-access | Seed each account with at least one real resource (a document, an upload, a row) |
+| `Docker not found` / ZAP image missing | ZAP is optional and needs Docker plus the image | Pass `--skip-zap`, or install Docker and `docker pull ghcr.io/zaproxy/zaproxy:stable` |
+| Rate limiting (429s) mid-scan | Too much probe concurrency for the target | Run modules individually: `python -m pytest tests/test_injection.py --profile profiles/your-site.yaml -v` |
+| `Profile not found` | The `--profile` path is relative to where you invoked `run.sh` | Run from the StackBadger directory or pass an absolute path |
+| `Unsupported auth adapter` | `stack.auth` is not one of `clerk` / `firebase` / `supabase-auth` / `nextauth` | Use a supported value; for other providers supply `PENTEST_USER_*_JWT` tokens and the generic bearer flow runs where possible |
+| `Refusing to send the service-role key to '...'` | `SUPABASE_PROJECT_URL` is not an `https://<ref>.supabase.co` origin — provisioning fails closed against credential exfiltration | Fix the typo; for custom-domain / self-hosted Supabase re-run with `--allow-custom-domain` |
+| `provision_accounts.py` exits `2` | You asked for a manual provider (Clerk / Firebase / NextAuth) — it printed dashboard steps, nothing was provisioned | Create the accounts in the provider dashboard per the printed steps, then fill `.env` |
+| Run finishes "clean" but most probes skipped | Skips citing missing profile fields mean those surfaces were **never tested** | Fill in the profile (endpoints, `supabase.tables`, provider blocks) — see [Reports](#reports) |
