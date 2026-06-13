@@ -139,7 +139,7 @@ def _scrub(text: str) -> str:
 # Read-side helpers come from doctor.py — same parsing semantics everywhere
 # (run.sh `source`, doctor preflight, provisioning) so the three consumers
 # can never drift. The write side (update_env_file) is unique to this script.
-from doctor import load_dotenv, parse_env_file  # noqa: E402
+from doctor import _force_utf8_streams, load_dotenv, parse_env_file  # noqa: E402
 
 
 def update_env_file(path: Path, updates: dict[str, str | None]) -> None:
@@ -583,21 +583,6 @@ def cleanup(args, env: dict[str, str], env_file: Path, http) -> int:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-
-def _force_utf8_streams() -> None:
-    """Emit UTF-8 regardless of the platform's default code page.
-
-    On Windows, stdout/stderr default to the legacy ANSI code page (e.g.
-    cp1252), so non-ASCII characters in the printed steps render as mojibake
-    even in a UTF-8-capable console. Reconfiguring is a no-op where the stream
-    is already UTF-8, and is skipped when stdout/stderr was replaced by an
-    object without reconfigure() (e.g. a test capture)."""
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8")
-        except (AttributeError, ValueError):
-            pass
-
 
 def main(
     argv: list[str] | None = None,

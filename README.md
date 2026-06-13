@@ -482,7 +482,7 @@ Stripe + Netlify) and `profiles/firebase-example.yaml` (Firebase + Firestore).
 profiles/            Site profile YAML (structural metadata: endpoints, tables, RPCs)
     |
     v
-discover.py          Provider fingerprinting + live bundle discovery (or static source analysis)
+discover.py          Provider fingerprinting from a source tree (static; live discovery runs in run.sh)
     |
     v
 profile_assembler.py Merges discovered config + optional YAML overrides

@@ -57,6 +57,18 @@ def test_teardown_main_injects_cleanup_flag(monkeypatch):
     assert captured["kwargs"].get("prog") == "teardown.py"
 
 
+def test_teardown_help_shows_teardown_identity(capsys):
+    # End-to-end through the real ArgumentParser: teardown's prog/description
+    # must reach --help, not just the delegation seam. A dropped/misspelled
+    # description kwarg would surface here.
+    with pytest.raises(SystemExit) as exc:
+        teardown.main(["--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "teardown.py" in out  # prog
+    assert "Delete the two StackBadger" in out  # description
+
+
 def test_teardown_does_not_duplicate_cleanup_flag(monkeypatch):
     captured = {}
     monkeypatch.setattr(pa, "main", lambda argv, **kwargs: captured.setdefault("argv", argv) and 0 or 0)
