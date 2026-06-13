@@ -365,7 +365,27 @@ def _emit(results: list[CheckResult], exit_code: int, json_mode: bool) -> None:
         }, indent=2))
 
 
+def force_utf8_streams() -> None:
+    """Emit UTF-8 regardless of the platform's default code page.
+
+    On Windows, stdout/stderr default to the legacy ANSI code page (e.g.
+    cp1252), so non-ASCII characters in human-readable output render as mojibake
+    even in a UTF-8-capable console. Best-effort and purely cosmetic:
+    reconfiguring is a no-op where the stream is already UTF-8, is skipped when
+    the stream lacks reconfigure() (e.g. a test capture), and any failure is
+    swallowed rather than aborting startup.
+
+    Shared helper — also imported by provision_accounts.py (and thus teardown.py).
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except Exception:  # noqa: BLE001 — best-effort cosmetic; never block startup
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    force_utf8_streams()
     parser = argparse.ArgumentParser(
         description="Non-destructive preflight self-check (no attack traffic).",
     )

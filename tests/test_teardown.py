@@ -43,8 +43,9 @@ def _run_teardown(env_file: Path, handler) -> int:
 def test_teardown_main_injects_cleanup_flag(monkeypatch):
     captured = {}
 
-    def _fake_main(argv):
+    def _fake_main(argv, **kwargs):
         captured["argv"] = argv
+        captured["kwargs"] = kwargs
         return 0
 
     monkeypatch.setattr(pa, "main", _fake_main)
@@ -52,11 +53,25 @@ def test_teardown_main_injects_cleanup_flag(monkeypatch):
     assert rc == 0
     assert captured["argv"][0] == "--cleanup"
     assert "--project-url" in captured["argv"]
+    # teardown reframes the shared parser's --help via prog/description.
+    assert captured["kwargs"].get("prog") == "teardown.py"
+
+
+def test_teardown_help_shows_teardown_identity(capsys):
+    # End-to-end through the real ArgumentParser: teardown's prog/description
+    # must reach --help, not just the delegation seam. A dropped/misspelled
+    # description kwarg would surface here.
+    with pytest.raises(SystemExit) as exc:
+        teardown.main(["--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "teardown.py" in out  # prog
+    assert "Delete the two StackBadger" in out  # description
 
 
 def test_teardown_does_not_duplicate_cleanup_flag(monkeypatch):
     captured = {}
-    monkeypatch.setattr(pa, "main", lambda argv: captured.setdefault("argv", argv) and 0 or 0)
+    monkeypatch.setattr(pa, "main", lambda argv, **kwargs: captured.setdefault("argv", argv) and 0 or 0)
     teardown.main(["--cleanup"])
     assert captured["argv"].count("--cleanup") == 1
 

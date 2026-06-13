@@ -332,6 +332,44 @@ def test_human_output_pass_fail_lines(tmp_path, monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
+# force_utf8_streams (shared helper; also imported by provision_accounts.py)
+# ---------------------------------------------------------------------------
+
+def test_force_utf8_streams_reconfigures_both(monkeypatch):
+    calls = []
+
+    class _Stream:
+        def reconfigure(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(doctor.sys, "stdout", _Stream())
+    monkeypatch.setattr(doctor.sys, "stderr", _Stream())
+    doctor.force_utf8_streams()
+    assert calls == [{"encoding": "utf-8"}, {"encoding": "utf-8"}]
+
+
+def test_force_utf8_streams_swallows_missing_reconfigure(monkeypatch):
+    # A stream without reconfigure() (e.g. a test capture) must not raise.
+    monkeypatch.setattr(doctor.sys, "stdout", object())
+    monkeypatch.setattr(doctor.sys, "stderr", object())
+    doctor.force_utf8_streams()  # no exception
+
+
+def test_force_utf8_streams_swallows_reconfigure_errors(monkeypatch):
+    # Best-effort and cosmetic: any reconfigure failure (e.g. OSError on a
+    # broken/redirected stream) is swallowed, never aborting startup. Guards the
+    # broad `except` — a narrower (AttributeError, ValueError) would let this
+    # OSError propagate.
+    class _Boom:
+        def reconfigure(self, **kwargs):
+            raise OSError("broken pipe")
+
+    monkeypatch.setattr(doctor.sys, "stdout", _Boom())
+    monkeypatch.setattr(doctor.sys, "stderr", _Boom())
+    doctor.force_utf8_streams()  # no exception
+
+
+# ---------------------------------------------------------------------------
 # Integration: run.sh delegation (sandboxed shell)
 # ---------------------------------------------------------------------------
 

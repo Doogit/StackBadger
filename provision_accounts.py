@@ -139,7 +139,7 @@ def _scrub(text: str) -> str:
 # Read-side helpers come from doctor.py — same parsing semantics everywhere
 # (run.sh `source`, doctor preflight, provisioning) so the three consumers
 # can never drift. The write side (update_env_file) is unique to this script.
-from doctor import load_dotenv, parse_env_file  # noqa: E402
+from doctor import force_utf8_streams, load_dotenv, parse_env_file  # noqa: E402
 
 
 def update_env_file(path: Path, updates: dict[str, str | None]) -> None:
@@ -584,9 +584,17 @@ def cleanup(args, env: dict[str, str], env_file: Path, http) -> int:
 # Entry point
 # ---------------------------------------------------------------------------
 
-def main(argv: list[str] | None = None, http=None) -> int:
+def main(
+    argv: list[str] | None = None,
+    http=None,
+    *,
+    prog: str | None = None,
+    description: str | None = None,
+) -> int:
+    force_utf8_streams()
     parser = argparse.ArgumentParser(
-        description=(
+        prog=prog,
+        description=description or (
             "Create (or, with --cleanup, delete) the two StackBadger test "
             "accounts. Automated for Supabase Auth via the GoTrue Admin API; "
             "other providers print documented manual steps."

@@ -43,7 +43,18 @@ def main(argv: list[str] | None = None) -> int:
         argv = ["--cleanup", *argv]
     from provision_accounts import main as provision_main
 
-    return provision_main(argv)
+    return provision_main(
+        argv,
+        prog="teardown.py",
+        description=(
+            "Delete the two StackBadger test accounts seeded by "
+            "provision_accounts.py — by the user IDs stored in .env (falling "
+            "back to the deterministic stackbadger-pentest-* emails) via the "
+            "GoTrue Admin API. Idempotent: running with nothing provisioned is "
+            "a no-op. Supabase Auth only; --provider clerk|firebase|nextauth "
+            "prints where to delete manually. (--cleanup is always applied.)"
+        ),
+    )
 
 
 if __name__ == "__main__":

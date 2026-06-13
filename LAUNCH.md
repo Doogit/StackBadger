@@ -135,7 +135,7 @@ python3 --version  # must be 3.11+
 if [ ! -d .venv ]; then
   python3 -m venv .venv
 fi
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+source .venv/bin/activate  # Windows (Git Bash): source .venv/Scripts/activate
 
 # Install dependencies
 pip install -e . --quiet
