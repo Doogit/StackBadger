@@ -1,7 +1,10 @@
 # StackBadger — Interactive Launch
 
-This file is the agent runbook for StackBadger. Tell Claude Code:
-**"Follow LAUNCH.md to run a security test against https://your-site.com"**
+This file is the **agent runbook**: numbered, gated steps for an AI agent driving a run. Tell
+Claude Code: **"Follow LAUNCH.md to run a security test against https://your-site.com"**
+
+Humans: start with [README.md](README.md) instead — quickstart, config reference, profile schema,
+and the [Troubleshooting table](README.md#troubleshooting) this runbook leans on.
 
 ---
 
@@ -9,6 +12,18 @@ This file is the agent runbook for StackBadger. Tell Claude Code:
 
 Follow these steps in order. Ask the user for input where indicated.
 Do NOT proceed past a step until it succeeds.
+
+The gated sequence:
+
+```
+0  source detect (optional)   1  gather inputs        1a authorization (HUMAN-set)
+1b mode                       2  environment setup    3 / 3a credentials or provision
+4  profile                    4a doctor gate          5  run
+6  interpret exit code        7  recap                8  teardown (if provisioned)
+```
+
+When any step fails with an error you don't recognize, map it via the README
+[Troubleshooting table](README.md#troubleshooting) before asking the user.
 
 ### Step 0 (optional accelerator): Source stack-detection
 
@@ -205,10 +220,33 @@ Decide which applies:
    Stripe). Supabase Auth shares Supabase's fingerprint and is not auto-detected as the auth
    provider — supply a profile naming `stack.auth: supabase-auth` for those targets.
 
-> **Note — NextAuth (cookie auth).** `run.sh` signs in via the adapter named in `stack.auth` for
-> every supported stack. The optional ZAP scan is seeded with whatever the adapter yields: a Bearer
-> header for bearer stacks (Clerk / Firebase / Supabase Auth), or the session **cookie** for NextAuth
-> (cookie auth). Sign-in, pytest, and ZAP all run end-to-end for every stack.
+Profile field meanings (including `exclude_paths` / `exclude_tables` / `auth.verify_path`) are in
+the README [Profile schema](README.md#profile-schema) — don't re-derive them here. Every supported
+stack runs end-to-end, NextAuth (cookie auth) included: ZAP is seeded with whatever credential the
+adapter yields (Bearer header or session cookie).
+
+### Step 4a: Preflight gate (doctor.py)
+
+Run the machine-readable self-check before the harness:
+
+```bash
+# PROFILE_FLAG: --profile profiles/<name>.yaml if Step 4 chose one; omit for black-box
+python doctor.py <TARGET_URL> <PROFILE_FLAG> --json
+```
+
+stdout is one JSON object: `{"passed": bool, "exit_code": int, "checks": [...]}`. Each check
+carries a `fix` string when it fails; on an internal doctor error (exit `19`) the JSON also
+carries a top-level `error` string — relay it.
+
+Gate: proceed only when `passed` is `true` (exit `0`). On failure, relay the failing check's
+`fix` to the user and wait — exit codes `10`–`19` identify which check failed (Python version,
+missing credentials, unreachable target, User A/B sign-in). `run.sh` re-runs doctor internally
+and collapses any failure to exit `10`; running it explicitly here catches environment problems
+early and gives you structured output instead of a mid-run abort.
+
+Note: a clean doctor pass does not guarantee `run.sh` exits 0 — the `CONFIRM_TARGET` /
+`CONFIRM_AUTHORIZED` gates (Step 1a) and the `auth.verify_path` fast-fail also exit `10` on
+their own; doctor does not check those.
 
 ### Step 5: Run the harness
 
@@ -232,8 +270,6 @@ else
 fi
 ```
 
-NextAuth (cookie auth) targets run end-to-end too — ZAP is seeded with the session cookie.
-
 **Alternative — direct pytest** (skips `run.sh`'s pre-flight and ZAP seeding; handy for debugging a
 single module):
 
@@ -255,26 +291,35 @@ python -m reports.aggregate || true
 failures/errors (a failed security probe). Read the per-test results from `report.json` at the
 harness root (or `reports/output/` if you ran `reports.aggregate`).
 
-**`run.sh`:** `run.sh` exits `1` for BOTH harness failures (missing deps, sign-in error,
-unreachable target) AND HIGH/CRITICAL findings. Distinguish by checking for report output:
+**`run.sh`:** check exit `10` first — it is categorically different from the others:
+
+- Exit `10`: a preflight check or safety gate **refused the run before any probe fired** —
+  doctor failure, `CONFIRM_TARGET` / `CONFIRM_AUTHORIZED` mismatch, or the `auth.verify_path`
+  fast-fail. Nothing was scanned and this is never a finding. Relay the `[FAIL]` / gate message
+  (it names the fix); for gate messages, the HUMAN must act (Step 1a) — never set the variables
+  yourself.
+- Exit `0`: "Clean run — no findings." (But check the skipped count — see Step 7.4.)
+- Exit `1`: HIGH/CRITICAL findings present. Summarize from `reports/output/`.
+- Exit `2`: MEDIUM/LOW findings only. Summarize as warnings.
+- Exit `3`: Infrastructure error from report aggregation (collection failure, parse error).
+
+Edge case — **any exit code other than `10` with no `reports/output/`**: pytest died before its
+report was written and aggregation was skipped, so `run.sh` propagated pytest's raw exit code
+(which can be 1–5). The findings-severity interpretation above only applies when
+`reports/output/` is populated; with no reports, treat the exit as an infrastructure failure and
+report the stdout/stderr error, not as findings:
 
 ```bash
 if [ -d reports/output ] && ls reports/output/*.json >/dev/null 2>&1; then
-  echo "Reports generated — interpret the exit code as test results."
+  echo "Reports generated — interpret the exit code as findings severity."
 else
-  echo "No reports — the harness failed before tests ran. Report the stdout/stderr error."
+  echo "No reports — infrastructure failure before aggregation. Report the stdout/stderr error."
 fi
 ```
 
-Interpretation:
-- Exit 0: "Clean run — no findings."
-- Exit 1 WITH reports: HIGH/CRITICAL findings present. Summarize from `reports/output/`.
-- Exit 1 WITHOUT reports: Harness infrastructure failure. Report the error from stdout/stderr.
-- Exit 2: MEDIUM/LOW findings only. Summarize as warnings.
-- Exit 3: Infrastructure error (pytest collection failure, missing deps).
-
 Read and summarize `reports/output/` for the user. Highlight actionable findings and distinguish
-them from the known platform-dependent findings listed in the README.
+them from the known platform-dependent findings listed in the README. Map unrecognized errors via
+the README [Troubleshooting table](README.md#troubleshooting).
 
 ### Step 7: Post-run recap
 
