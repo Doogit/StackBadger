@@ -365,7 +365,7 @@ def _emit(results: list[CheckResult], exit_code: int, json_mode: bool) -> None:
         }, indent=2))
 
 
-def _force_utf8_streams() -> None:
+def force_utf8_streams() -> None:
     """Emit UTF-8 regardless of the platform's default code page.
 
     On Windows, stdout/stderr default to the legacy ANSI code page (e.g.
@@ -385,7 +385,7 @@ def _force_utf8_streams() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    _force_utf8_streams()
+    force_utf8_streams()
     parser = argparse.ArgumentParser(
         description="Non-destructive preflight self-check (no attack traffic).",
     )

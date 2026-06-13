@@ -332,7 +332,7 @@ def test_human_output_pass_fail_lines(tmp_path, monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
-# _force_utf8_streams (shared helper; also imported by provision_accounts.py)
+# force_utf8_streams (shared helper; also imported by provision_accounts.py)
 # ---------------------------------------------------------------------------
 
 def test_force_utf8_streams_reconfigures_both(monkeypatch):
@@ -344,7 +344,7 @@ def test_force_utf8_streams_reconfigures_both(monkeypatch):
 
     monkeypatch.setattr(doctor.sys, "stdout", _Stream())
     monkeypatch.setattr(doctor.sys, "stderr", _Stream())
-    doctor._force_utf8_streams()
+    doctor.force_utf8_streams()
     assert calls == [{"encoding": "utf-8"}, {"encoding": "utf-8"}]
 
 
@@ -352,7 +352,7 @@ def test_force_utf8_streams_swallows_missing_reconfigure(monkeypatch):
     # A stream without reconfigure() (e.g. a test capture) must not raise.
     monkeypatch.setattr(doctor.sys, "stdout", object())
     monkeypatch.setattr(doctor.sys, "stderr", object())
-    doctor._force_utf8_streams()  # no exception
+    doctor.force_utf8_streams()  # no exception
 
 
 def test_force_utf8_streams_swallows_reconfigure_errors(monkeypatch):
@@ -366,7 +366,7 @@ def test_force_utf8_streams_swallows_reconfigure_errors(monkeypatch):
 
     monkeypatch.setattr(doctor.sys, "stdout", _Boom())
     monkeypatch.setattr(doctor.sys, "stderr", _Boom())
-    doctor._force_utf8_streams()  # no exception
+    doctor.force_utf8_streams()  # no exception
 
 
 # ---------------------------------------------------------------------------

@@ -139,7 +139,7 @@ def _scrub(text: str) -> str:
 # Read-side helpers come from doctor.py — same parsing semantics everywhere
 # (run.sh `source`, doctor preflight, provisioning) so the three consumers
 # can never drift. The write side (update_env_file) is unique to this script.
-from doctor import _force_utf8_streams, load_dotenv, parse_env_file  # noqa: E402
+from doctor import force_utf8_streams, load_dotenv, parse_env_file  # noqa: E402
 
 
 def update_env_file(path: Path, updates: dict[str, str | None]) -> None:
@@ -591,7 +591,7 @@ def main(
     prog: str | None = None,
     description: str | None = None,
 ) -> int:
-    _force_utf8_streams()
+    force_utf8_streams()
     parser = argparse.ArgumentParser(
         prog=prog,
         description=description or (
