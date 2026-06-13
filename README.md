@@ -43,6 +43,11 @@ not bypass either gate. See `.env.example` for the exact format.
 ## Prerequisites
 
 - Python 3.11 or later, and pip
+- A POSIX shell to run `run.sh` — the orchestrator is a Bash script. macOS and
+  Linux already have one; on **Windows use WSL or Git Bash**. The Quickstart's
+  `export` / `source` / `./run.sh` commands do **not** run in PowerShell or
+  `cmd`. (The Python tools — `doctor.py`, `provision_accounts.py`,
+  `teardown.py`, `discover.py` — run anywhere Python does.)
 - Two test accounts in the target's auth system — for Supabase Auth,
   [`provision_accounts.py`](#test-accounts--provisioning) creates them for you
 - A live or staging deployment of the target
@@ -56,7 +61,7 @@ Five steps from a fresh clone to a report (all commands run from the repository 
 # 0. One-time setup
 git clone https://github.com/Doogit/StackBadger.git && cd StackBadger
 python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+source .venv/bin/activate          # Windows (Git Bash): source .venv/Scripts/activate
 pip install -e .
 
 # 1. Copy the env template
@@ -182,11 +187,12 @@ TARGET_BASE_URL=https://your-site.com \
 This is the `./run.sh` flow. With no profile it assumes Clerk + Supabase + Stripe; with `--profile`
 it uses the providers named in the profile, and step 2 signs in via that stack's auth adapter.
 
-1. **Discover** — `discover.py` fetches the target's HTML and JS bundles and extracts public config
+1. **Discover** — `run.sh` fetches the target's HTML and JS bundles and extracts public config
    (Supabase project URL + anon key, Clerk publishable key / FAPI host, and provider fingerprints)
-   the way an external attacker would. No secrets needed — these values are already public.
-   (`discover.py` can also fingerprint providers when pointed at a project's source tree, to help
-   author a profile.)
+   the way an external attacker would. No secrets needed — these values are already public. This
+   live URL crawl runs **automatically inside `run.sh`** — there is no `discover.py <url>` command.
+   Run standalone, `discover.py <dir>` performs the separate *source-tree* scan that fingerprints
+   providers and authors a profile (see [Adding a new target](#adding-a-new-target)).
 2. **Sign in** — `run.sh` authenticates the two test accounts via the adapter named in `stack.auth`
    (Clerk FAPI, Firebase, Supabase Auth, or NextAuth), using email + password exactly as a browser
    does, and refreshes the credential throughout the run.

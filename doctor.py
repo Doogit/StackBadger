@@ -365,7 +365,23 @@ def _emit(results: list[CheckResult], exit_code: int, json_mode: bool) -> None:
         }, indent=2))
 
 
+def _force_utf8_streams() -> None:
+    """Emit UTF-8 regardless of the platform's default code page.
+
+    On Windows, stdout/stderr default to the legacy ANSI code page (e.g.
+    cp1252), so the non-ASCII separators in the [PASS]/[FAIL] lines render as
+    mojibake even in a UTF-8-capable console. Reconfiguring is a no-op where the
+    stream is already UTF-8, and is skipped when stdout/stderr was replaced by an
+    object without reconfigure() (e.g. a test capture)."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _force_utf8_streams()
     parser = argparse.ArgumentParser(
         description="Non-destructive preflight self-check (no attack traffic).",
     )
