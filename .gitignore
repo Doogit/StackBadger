@@ -22,3 +22,14 @@ zap/automation-plan.runtime.yaml
 !zap/zap-api.env.example
 .venv/
 venv/
+
+# Real per-target profiles (keep example templates tracked)
+profiles/*.yaml
+!profiles/*-example.yaml
+
+# Engagement authorization (keep the example template tracked)
+AUTHORIZATION.md
+roe/
+
+# Claude Code (personal, machine-local)
+.claude/settings.local.json
