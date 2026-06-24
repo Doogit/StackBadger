@@ -358,8 +358,9 @@ def test_oauth_status_endpoint_does_not_leak_tokens(profile, user_a_client, evid
         pytest.skip("oauth.delegated_send.status_endpoints not set; nothing to check.")
 
     for ep in status_eps:
-        path = ep["path"] if isinstance(ep, dict) else ep.path
-        method = ((ep.get("method") if isinstance(ep, dict) else ep.method) or "GET").upper()
+        ep_dict = dict(ep.items()) if hasattr(ep, "items") else ep
+        path = ep_dict["path"]
+        method = (ep_dict.get("method") or "GET").upper()
         url = _abs_url(profile, path)
         resp = _request_or_skip(
             lambda: user_a_client.request(method, url, timeout=15),
