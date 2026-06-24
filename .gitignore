@@ -23,3 +23,15 @@ zap/automation-plan.runtime.yaml
 .venv/
 venv/
 .context/
+
+# Real per-target profiles (keep example templates tracked)
+profiles/*.yaml
+!profiles/*-example.yaml
+
+# Engagement authorization (keep the example template tracked)
+AUTHORIZATION.md
+roe/
+
+# Local agent workspace config (local only — not for publication)
+.claude/
+CLAUDE.md
