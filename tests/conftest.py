@@ -99,6 +99,21 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "s3: test requires S3-compatible storage (S3 or R2)")
     config.addinivalue_line("markers", "paddle: test requires Paddle payments")
     config.addinivalue_line("markers", "lemonsqueezy: test requires LemonSqueezy payments")
+    # ASVS 5.0 scope axis (orthogonal to the read-only/write safety axis).
+    # asvs_extended gates heavy probes behind SCAN_SCOPE=asvs; asvs()/cwe()
+    # carry the requirement/CWE ids the coverage ledger joins on (Tier-2).
+    config.addinivalue_line(
+        "markers",
+        "asvs_extended: heavy ASVS-scope probe; deselected unless SCAN_SCOPE=asvs",
+    )
+    config.addinivalue_line(
+        "markers",
+        "asvs(id): ASVS 5.0 requirement id(s) this probe exercises (coverage ledger)",
+    )
+    config.addinivalue_line(
+        "markers",
+        "cwe(id): CWE id(s) this probe exercises (CASA grading unit, coverage ledger)",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +135,19 @@ def pytest_collection_modifyitems(
         for item in items:
             if item.get_closest_marker("write_probe"):
                 item.add_marker(skip_write)
+
+    # --- scope-axis gating (orthogonal to the write_probe safety axis) ---
+    # SCAN_SCOPE=core (default) deselects asvs_extended probes; SCAN_SCOPE=asvs
+    # runs the full set. Skip-with-reason (not deselect) keeps the skip auditable
+    # in the report, mirroring the write_probe block above.
+    scan_scope = os.environ.get("SCAN_SCOPE", "core")
+    if scan_scope != "asvs":
+        skip_extended = pytest.mark.skip(
+            reason="Skipped in core scope (set SCAN_SCOPE=asvs to enable extended ASVS probes)"
+        )
+        for item in items:
+            if item.get_closest_marker("asvs_extended"):
+                item.add_marker(skip_extended)
 
     # --- stack-marker gating ---
     profile_path = config.getoption("--profile")
