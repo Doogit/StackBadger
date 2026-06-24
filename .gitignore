@@ -5,8 +5,8 @@ __pycache__/
 .pytest_cache/
 report.json
 
-# Internal planning docs (local only — not for publication)
-docs/plans/
+# Internal docs / planning / audits (local only — not for publication)
+docs/
 
 # Generated files
 reports/output/
