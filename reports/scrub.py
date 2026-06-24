@@ -85,6 +85,82 @@ _COOKIE_RE = re.compile(
 # with non-secret substrings and over-redact the report.
 _MIN_SECRET_LEN = 8
 
+# ---------------------------------------------------------------------------
+# OAuth / delegated-send (Gmail / Drive / M365) response-body redaction
+# ---------------------------------------------------------------------------
+#
+# EvidenceCapture persists response BODIES in full. The §P1-D delegated-send
+# probe and §P1-B OAuth-client probes touch endpoints that can carry live
+# OAuth tokens or restricted-scope user content (email text, Drive files), so a
+# captured Response could otherwise write a real credential or PII to
+# reports/evidence/. The probes themselves capture sanitized FakeResponse bodies,
+# but this pass is the defense-in-depth gate (plan §6): it runs on every evidence
+# body so a real Response that slips through is still scrubbed.
+
+# Google OAuth access token (ya29.<...>) and refresh token (1//<...>). These are
+# bare secrets with no key=value wrapper, so the JWT/Bearer passes miss them.
+_GOOGLE_ACCESS_TOKEN_RE = re.compile(r"ya29\.[A-Za-z0-9_.\-]{10,}")
+_GOOGLE_REFRESH_TOKEN_RE = re.compile(r"1//[0-9A-Za-z_\-]{10,}")
+
+# JSON token/secret field values. Redacts only the VALUE, preserving the field
+# name so a leakage finding still shows WHICH secret was exposed (e.g.
+# ``"access_token":"[REDACTED_TOKEN_VALUE]"``). Tolerates whitespace around the
+# colon; stops at the closing quote so surrounding JSON structure survives.
+_TOKEN_FIELD_NAMES = (
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "client_secret",
+    "authorization_code",
+)
+_TOKEN_FIELD_RE = re.compile(
+    r'("(?:' + "|".join(_TOKEN_FIELD_NAMES) + r')"\s*:\s*)"[^"]*"'
+)
+
+# Markers that identify a Gmail / Drive / Microsoft Graph mail payload. When any
+# appears, the whole body is treated as restricted-scope user content (email
+# text, attachments, file data) and redacted wholesale — pattern redaction
+# cannot reliably carve user content out of an arbitrary JSON document.
+_GMAIL_DRIVE_MARKERS = (
+    '"snippet"',          # Gmail message resource
+    '"threadId"',
+    '"labelIds"',
+    '"historyId"',
+    '"webContentLink"',   # Drive file resource
+    '"webViewLink"',
+    "gmail.googleapis.com",
+    "www.googleapis.com/drive",
+    "graph.microsoft.com",
+)
+
+
+def scrub_evidence_body(body: str, url: str = "") -> str:
+    """Return an evidence request/response *body* with OAuth secrets / PII removed.
+
+    Layered, most-aggressive-first:
+
+    1. **Gmail/Drive/M365 payload** — if the body (or its source *url*) looks like
+       a Gmail / Drive / Graph mail response, the entire body is replaced with a
+       redaction marker. Such a body is wholesale restricted-scope user content.
+    2. **Bearer / JWT / cookie** — the existing :func:`scrub_text` passes.
+    3. **OAuth token shapes** — bare Google access/refresh tokens and JSON
+       ``access_token`` / ``refresh_token`` / ``id_token`` / ``client_secret``
+       field values (value only; field name preserved so a leak is still visible).
+
+    ``url`` is the request URL; a googleapis/graph host triggers the wholesale
+    redaction even when the body markers are absent (e.g. a binary Drive blob).
+    """
+    if not body:
+        return body
+    haystack = body + " " + (url or "")
+    if any(marker in haystack for marker in _GMAIL_DRIVE_MARKERS):
+        return "[REDACTED: Gmail/Drive/M365 response body — restricted-scope content]"
+    text = scrub_text(body)
+    text = _GOOGLE_ACCESS_TOKEN_RE.sub("[REDACTED_OAUTH_TOKEN]", text)
+    text = _GOOGLE_REFRESH_TOKEN_RE.sub("[REDACTED_OAUTH_TOKEN]", text)
+    text = _TOKEN_FIELD_RE.sub(r'\1"[REDACTED_TOKEN_VALUE]"', text)
+    return text
+
 
 def scrub_text(text: str, extra_secrets: tuple[str, ...] = ()) -> str:
     """Return ``text`` with auth secrets redacted.

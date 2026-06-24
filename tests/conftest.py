@@ -61,6 +61,7 @@ from exclusions import (  # noqa: E402
 )
 from profile import load_profile  # noqa: E402
 from profile_assembler import assemble_profile  # noqa: E402
+from reports.scrub import scrub_evidence_body  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -718,19 +719,24 @@ class EvidenceCapture:
 
     def _build_record(self, response: httpx.Response, label: str) -> dict:
         req = response.request
+        url = str(req.url)
+        # Response/request bodies are scrubbed for OAuth tokens and Gmail/Drive/
+        # M365 user content before they touch disk (plan §6 evidence-redaction
+        # gate). Headers are redacted separately by _scrub_headers; the body pass
+        # catches a credential or restricted-scope payload reflected in the body.
         record: dict = {
             "_label": label,
             "timestamp": datetime.now(tz=timezone.utc).isoformat(),
             "request": {
                 "method": req.method,
-                "url": str(req.url),
+                "url": url,
                 "headers": self._scrub_headers(dict(req.headers)),
-                "body": self._safe_request_body(req),
+                "body": scrub_evidence_body(self._safe_request_body(req), url=url),
             },
             "response": {
                 "status_code": response.status_code,
                 "headers": self._scrub_headers(dict(response.headers)),
-                "body": self._decode_content(response.content),
+                "body": scrub_evidence_body(self._decode_content(response.content), url=url),
             },
         }
         return record
