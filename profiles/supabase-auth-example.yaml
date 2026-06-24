@@ -49,6 +49,46 @@ test_accounts:
   user_b:
     email: "pentest-b@example.com"
 
+# --- OAuth delegated-send (optional) ---
+# Describes a backend-for-frontend (BFF) that performs an OAuth authorization-
+# code flow to obtain delegated Gmail / Microsoft Graph send access on the
+# user's behalf, then sends mail server-side so the access/refresh tokens never
+# reach the browser. Drives the §P1-B OAuth client-observable probes
+# (state/PKCE/scope-minimisation) and the §P1-D token-storage probe.
+#
+# Every field is optional — each probe skips with a reason when the field it
+# needs is absent. All hosts here are reserved placeholders, so live probes skip.
+# Trust boundary: StackBadger probes only the CLIENT-observable controls (the app
+# generates state + a PKCE code_challenge, requests minimal scopes). Authorization-
+# server-owned controls (redirect-URI exact-match, auth-code single-use, PKCE
+# *enforcement*) belong to Google/Microsoft and are Track-C attestation, not probes.
+oauth:
+  delegated_send:
+    provider: google                       # google | microsoft
+    # App route that initiates the flow and 302-redirects to the AS authorize
+    # endpoint. The probe fetches it (no redirect-follow) and inspects the
+    # Location query for state / code_challenge / scope.
+    authorize_url: /api/oauth/google/authorize
+    # The app's own callback route(s) registered with the AS.
+    redirect_uris:
+      - "https://example.com/api/oauth/google/callback"
+    # The app's BFF token-exchange route, if it exposes one (server-internal).
+    token_endpoint: /api/oauth/google/token
+    # Scopes the app legitimately needs. The scope-minimisation probe flags an
+    # authorize request that asks for more (e.g. gmail.modify or full Drive).
+    required_scopes:
+      - "https://www.googleapis.com/auth/gmail.send"
+    # App endpoints that trigger a delegated send (token-leakage probe inspects
+    # their responses for access/refresh tokens — none should appear).
+    send_endpoints:
+      - path: /api/email/send
+        method: POST
+    # Endpoints that report OAuth connection / token status (a common spot for a
+    # poorly built BFF to echo a stored token back to the browser).
+    status_endpoints:
+      - path: /api/oauth/google/status
+        method: GET
+
 # --- Probe exclusions (optional; defaults are ALWAYS enforced) ---
 # Effective list = union(your entries, built-in defaults) — an empty or absent
 # list still leaves the defaults on. See exclusions.py for the default lists.

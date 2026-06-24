@@ -277,6 +277,20 @@ def _env_overrides() -> dict[str, Any]:
     if fapi_host:
         overrides.setdefault("clerk", {})["frontend_api"] = fapi_host
 
+    # OAuth delegated-send overrides. The plan (§6) gates live OAuth probing on a
+    # staging/test-account flow, so an operator can repoint the authorize/token
+    # routes at a staging BFF for one run without editing the tracked profile —
+    # mirroring the SUPABASE_PROJECT_URL / CLERK_FAPI_HOST override pattern. Both
+    # land under oauth.delegated_send so the §P1-B/§P1-D probes read one shape.
+    oauth_authorize_url = os.environ.get("OAUTH_AUTHORIZE_URL")
+    oauth_token_endpoint = os.environ.get("OAUTH_TOKEN_ENDPOINT")
+    if oauth_authorize_url or oauth_token_endpoint:
+        ds = overrides.setdefault("oauth", {}).setdefault("delegated_send", {})
+        if oauth_authorize_url:
+            ds["authorize_url"] = oauth_authorize_url
+        if oauth_token_endpoint:
+            ds["token_endpoint"] = oauth_token_endpoint
+
     return overrides
 
 
