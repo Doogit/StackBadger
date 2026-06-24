@@ -190,10 +190,12 @@ def _scan_url_for_secrets(url: str) -> tuple[list[str], list[str]]:
                 )
             elif key == "code":
                 # An OAuth authorization code is expected in a redirect URL by
-                # design (single-use, short-lived) and is high-entropy, so
-                # entropy alone is NOT a CWE-598 leak — only a JWT mis-placed
-                # under ?code= (handled above) escalates. Record, don't escalate.
-                low.append("OAuth authorization-code parameter present in URL (expected)")
+                # design (single-use, short-lived) and is high-entropy, so it is
+                # NOT a CWE-598 leak at all — not HIGH, and not a low finding
+                # either (low findings still fail the suite). Only a JWT
+                # mis-placed under ?code= (handled above) is reported. Emit
+                # nothing here so a normal OAuth callback URL never fails the run.
+                continue
             elif _HIGH_ENTROPY_VALUE_RE.match(value):
                 high.append(
                     f"ambiguous parameter '{key}=' carries a "
@@ -503,8 +505,9 @@ def test_referrer_policy_limits_url_leakage(profile, evidence):
     "url,expect_high,expect_low",
     [
         # Benign long OAuth authorization code: high-entropy by design, expected
-        # in a redirect URL -> NOT a HIGH leak (regression guard for the FP fix).
-        ("https://app.example/cb?code=" + "4Ab" * 20 + "&state=xyz", False, True),
+        # in a redirect URL -> NOT a finding at all (neither HIGH nor low, so a
+        # normal OAuth callback never fails the suite). Regression guard.
+        ("https://app.example/cb?code=" + "4Ab" * 20 + "&state=xyz", False, False),
         # HIGH-confidence key -> escalates.
         ("https://app.example/cb?access_token=abc123def456", True, False),
         # Implicit-flow token in the URL FRAGMENT -> must still be caught.

@@ -445,14 +445,90 @@ def _is_static_env_jwt_credential(cred: str) -> bool:
 
 
 def _capture_credential(profile) -> str:
-    """Sign in on a throwaway adapter and return its replayable credential."""
+    """Sign in on a throwaway adapter and return its comparable session credential."""
     adapter = _fresh_adapter(profile)
     try:
-        headers = adapter.get_headers("user_a")
+        return _credential_for_comparison(adapter, "user_a")
     finally:
         _safe_close(adapter)
-    # Bearer token or Cookie — either uniquely identifies the session.
+
+
+def _credential_for_comparison(adapter, account: str = "user_a") -> str:
+    """Return the per-SESSION credential used to detect token rotation.
+
+    Bearer providers: the ``Authorization`` header (a per-session JWT).
+
+    Cookie providers (NextAuth/Auth.js): ONLY the session cookie, NOT the full
+    ``Cookie`` header. ``get_headers()`` exports every scoped cookie (CSRF,
+    callback, and other auxiliary cookies) which rotate on each sign-in even when
+    the *session* cookie is reused — comparing the whole header would make two
+    sign-ins look different despite a reused session, masking a V7.2.4 fixation
+    bug (false negative). We read the session cookie from the adapter state and
+    compare only that.
+    """
+    headers = adapter.get_headers(account)
+    if getattr(adapter, "auth_type", "bearer") == "cookie":
+        state = _session_state(adapter, account)
+        name = getattr(state, "session_cookie_name", None)
+        value = getattr(state, "session_cookie_value", None)
+        if name and value:
+            return f"{name}={value}"
+    # Bearer token, or a cookie provider whose session cookie is unavailable.
     return headers.get("Authorization") or headers.get("Cookie") or ""
+
+
+class _FakeSessionState:
+    def __init__(self, value: str) -> None:
+        self.session_cookie_name = "next-auth.session-token"
+        self.session_cookie_value = value
+
+
+class _FakeCookieAdapter:
+    """Minimal cookie-auth adapter whose Cookie header carries a rotating CSRF
+    cookie alongside the session cookie (mirrors NextAuthAdapter.get_headers)."""
+
+    auth_type = "cookie"
+
+    def __init__(self, session_value: str, csrf_value: str) -> None:
+        self._sessions = {"user_a": _FakeSessionState(session_value)}
+        self._csrf = csrf_value
+
+    def get_headers(self, account: str) -> dict:
+        st = self._sessions[account]
+        return {
+            "Cookie": (
+                f"next-auth.csrf-token={self._csrf}; "
+                f"{st.session_cookie_name}={st.session_cookie_value}"
+            )
+        }
+
+
+def test_cookie_rotation_compares_only_session_cookie():
+    """V7.2.4 fixation must be detected for cookie auth even when auxiliary
+    cookies rotate.
+
+    Offline regression for the false negative where comparing the whole Cookie
+    header (CSRF/callback cookies rotate per sign-in) hid a reused session
+    cookie. _credential_for_comparison must compare ONLY the session cookie.
+    """
+    # Same session cookie reused across two sign-ins; the CSRF cookie rotates.
+    a = _FakeCookieAdapter("REUSED-SESSION", "csrf-AAA")
+    b = _FakeCookieAdapter("REUSED-SESSION", "csrf-BBB")
+
+    # Full Cookie headers differ — the old whole-header comparison would PASS
+    # and miss the fixation.
+    assert a.get_headers("user_a")["Cookie"] != b.get_headers("user_a")["Cookie"]
+
+    # The session-only credential is identical, so the probe correctly flags the
+    # reused session (cred_one == cred_two -> the V7.2.4 assertion fires).
+    cred_a = _credential_for_comparison(a)
+    cred_b = _credential_for_comparison(b)
+    assert cred_a == cred_b == "next-auth.session-token=REUSED-SESSION"
+
+    # A genuinely rotated session still yields a distinct credential (no false
+    # positive when the session cookie actually changes).
+    c = _FakeCookieAdapter("FRESH-SESSION", "csrf-CCC")
+    assert _credential_for_comparison(c) != cred_a
 
 
 # ---------------------------------------------------------------------------
