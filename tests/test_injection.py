@@ -1,5 +1,6 @@
 """Injection tests: SQL injection, CSV formula injection, JSON injection,
-CRLF header injection, and RPC parameter injection.
+CRLF header injection, RPC parameter injection, plus the §P1-F injection-breadth
+family — OS-command injection, XXE, and SSRF.
 
 Test categories:
 - SQL injection via API parameters (all authenticated and anonymous endpoints)
@@ -7,12 +8,19 @@ Test categories:
 - JSON structural injection (deeply nested, prototype pollution payloads)
 - CRLF header injection
 - Supabase RPC parameter injection (all client-callable RPCs)
+- OS-command injection (ASVS V1.2.5, CWE-78) — time-based oracle / metacharacter
+- XXE (ASVS V1.5.1, CWE-611) — external-entity + OOB parameter-entity payloads
+- SSRF (ASVS V1.3.6 / V15.3.2, CWE-918) — internal/metadata target dereference;
+  the live SSRF probe is hard-gated behind SSRF_PROBE_ACK=1 until SECURITY.md
+  gains SSRF / internal-network probing authorization language.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys as _sys
+import time
 import uuid
 from pathlib import Path
 from pathlib import Path as _Path
@@ -375,3 +383,358 @@ def test_rpc_sqli(payload, rpc, profile, anon_client, evidence):
     _assert_no_data_leak(resp, _SQLI_PAYLOADS, context)
     if resp.status_code not in (200, 400, 401, 403, 404, 422):
         evidence.capture(resp, f"rpc_{rpc_name}_sqli_status_{resp.status_code}")
+
+
+# ===========================================================================
+# §P1-F Injection breadth: OS-command injection · XXE · SSRF
+# ---------------------------------------------------------------------------
+# Heavy ASVS-scope probes (asvs_extended; deselected unless SCAN_SCOPE=asvs).
+# Each is dual-tagged asvs(...) + cwe(...) for the coverage ledger. These send
+# payloads to existing endpoints expecting REJECTION / no-effect — observational
+# sends, NOT write_probe (matching the rest of this module). Every endpoint /
+# RPC is derived from the active profile; nothing is hardcoded.
+# ===========================================================================
+
+# Free-text fields that plausibly reach a shell / template / interpolation sink.
+_FREE_TEXT_HINTS = (
+    "name", "title", "label", "comment", "message", "note", "description",
+    "query", "search", "text", "input", "value", "filename", "path", "host",
+    "domain", "cmd", "command", "arg",
+)
+
+# Field names that plausibly accept a URL the server may fetch (SSRF sinks).
+_URL_FIELD_HINTS = (
+    "url", "uri", "link", "src", "source", "href", "callback", "webhook",
+    "redirect", "redirect_uri", "return_url", "next", "image", "img",
+    "avatar", "icon", "fetch", "endpoint", "target", "proxy", "feed",
+    "import_url", "remote", "file_url",
+)
+
+
+def _is_url_field(field: str) -> bool:
+    fl = field.lower()
+    return any(h in fl for h in _URL_FIELD_HINTS)
+
+
+def _is_free_text_field(field: str) -> bool:
+    fl = field.lower()
+    return any(h in fl for h in _FREE_TEXT_HINTS)
+
+
+# ---------------------------------------------------------------------------
+# OS-command injection (ASVS V1.2.5, CWE-78)
+# ---------------------------------------------------------------------------
+# Time-based oracle: a shell metacharacter chained to `sleep 5` should NOT add
+# ~5s to the response when the input is handled safely. We compare an injected
+# request's latency against a plain-text baseline (mirrors the pg_sleep style of
+# the SQLi payloads, measured here rather than only echoed).
+
+# Nominal delay the time-based payloads request, in seconds.
+_OSCMD_DELAY = 5
+# Latency threshold (s) above which we treat the delay as command execution.
+# Set comfortably under the requested delay to absorb baseline jitter while
+# still distinguishing a real ~5s sleep.
+_OSCMD_DELAY_THRESHOLD = 4.0
+
+_OSCMD_PAYLOADS: list[str] = [
+    f"; sleep {_OSCMD_DELAY}",
+    f"| sleep {_OSCMD_DELAY}",
+    f"& sleep {_OSCMD_DELAY}",
+    f"&& sleep {_OSCMD_DELAY}",
+    f"$(sleep {_OSCMD_DELAY})",
+    f"`sleep {_OSCMD_DELAY}`",
+    f"; ping -c {_OSCMD_DELAY} 127.0.0.1",
+    "; echo stackbadger-oscmd-marker",
+]
+
+# Endpoints carrying at least one free-text field (OS-command injection sinks).
+_OSCMD_ENDPOINTS = [
+    ep for ep in _ALL_ENDPOINTS_WITH_PROBE
+    if any(_is_free_text_field(f) for f in (ep.get("probe_body") or {}).keys())
+]
+
+
+@pytest.mark.asvs_extended
+@pytest.mark.asvs("1.2.5")
+@pytest.mark.cwe("78")
+@pytest.mark.parametrize(
+    "endpoint",
+    _OSCMD_ENDPOINTS,
+    ids=[_endpoint_id(e) for e in _OSCMD_ENDPOINTS],
+)
+def test_oscmd_injection_time_oracle(endpoint, profile, evidence):
+    """OS-command injection via free-text params, proved by a timing oracle.
+
+    Injects shell-metacharacter payloads (`; sleep 5`, `$(sleep 5)`, ...) into
+    each free-text field. A safe handler treats the value as opaque data: no
+    measurable delay, no command-echo reflection, and never a 500. A response
+    that takes ~the requested sleep longer than a plain-text baseline indicates
+    the payload reached a shell (ASVS V1.2.5, CWE-78).
+    """
+    from conftest import probe_body_for
+    path = endpoint.get("path", "")
+    method = endpoint.get("method", "POST")
+    url = _endpoint_url(profile, path)
+    base_body = probe_body_for(endpoint)
+
+    free_fields = [f for f in base_body.keys() if _is_free_text_field(f)]
+    if not free_fields:
+        pytest.skip(f"{path}: no free-text field to target for OS-command injection")
+
+    # Baseline latency with a benign value (the slowest of two samples, to bias
+    # the comparison conservatively against false positives from cold starts).
+    baseline = 0.0
+    benign_field = free_fields[0]
+    for _ in range(2):
+        benign_body = dict(base_body)
+        benign_body[benign_field] = "stackbadger-baseline"
+        t0 = time.perf_counter()
+        b_resp = send_request(method, url, json_body=benign_body, timeout=20.0)
+        baseline = max(baseline, time.perf_counter() - t0)
+
+    for field in free_fields:
+        for payload in _OSCMD_PAYLOADS:
+            injected = dict(base_body)
+            injected[field] = payload
+            context = f"{method} {path} {field}={payload!r}"
+            t0 = time.perf_counter()
+            resp = send_request(method, url, json_body=injected, timeout=20.0)
+            elapsed = time.perf_counter() - t0
+
+            _assert_safe_status(resp, context)
+            # The command marker must not be echoed (would prove substitution).
+            assert "stackbadger-oscmd-marker" not in resp.text, (
+                f"{context}: response echoed the OS-command marker — the shell "
+                "evaluated the injected `echo` (ASVS V1.2.5, CWE-78)."
+            )
+
+            if "sleep" in payload or "ping" in payload:
+                delayed = (
+                    elapsed >= _OSCMD_DELAY_THRESHOLD
+                    and elapsed - baseline >= _OSCMD_DELAY_THRESHOLD
+                )
+                if delayed:
+                    evidence.capture(
+                        resp,
+                        f"oscmd_timeoracle_{path.lstrip('/')}_{field}_"
+                        f"{elapsed:.1f}s_baseline_{baseline:.1f}s",
+                    )
+                assert not delayed, (
+                    f"{context}: response took {elapsed:.1f}s vs baseline "
+                    f"{baseline:.1f}s — the `{payload}` payload appears to have "
+                    "executed a shell sleep (ASVS V1.2.5, CWE-78)."
+                )
+            if resp.status_code not in (200, 400, 401, 403, 422):
+                evidence.capture(
+                    resp, f"oscmd_{path.lstrip('/')}_{field}_status_{resp.status_code}"
+                )
+
+
+# ---------------------------------------------------------------------------
+# XXE — external-entity resolution (ASVS V1.5.1, CWE-611)
+# ---------------------------------------------------------------------------
+# Markers that, if reflected, prove a file-disclosure entity resolved.
+_XXE_LEAK_MARKERS = (
+    "root:x:0:0:",          # /etc/passwd first line
+    "root:.*:0:0:",         # generic /etc/passwd shape
+    "[fonts]",              # win.ini section
+    "for 16-bit app support",  # win.ini comment
+)
+
+# XML payload fixtures (classic external entity + OOB parameter entity).
+_XXE_FIXTURES = ("xxe_classic.xml", "xxe_oob.xml")
+
+
+def _xml_capable_endpoints(profile) -> list[dict]:
+    """Endpoints plausibly accepting XML, derived from the profile.
+
+    An endpoint qualifies when its declared format/content-type is XML, or when
+    the upload endpoint's format is xml. No app names are hardcoded.
+    """
+    eps = (
+        _collection_endpoints("authenticated")
+        + _collection_endpoints("anonymous")
+        + _collection_endpoints("internal")
+    )
+    out = []
+    for ep in eps:
+        fmt = str(ep.get("format") or "").lower()
+        ctype = str(ep.get("content_type") or ep.get("accepts") or "").lower()
+        if "xml" in fmt or "xml" in ctype:
+            out.append(ep)
+    # An XML-format upload endpoint is also a candidate.
+    up = profile.uploads
+    if up and str(getattr(up, "format", "") or "").lower() == "xml" and getattr(up, "endpoint", None):
+        out.append({"path": up.endpoint, "method": "POST", "format": "xml"})
+    return out
+
+
+@pytest.mark.asvs_extended
+@pytest.mark.asvs("1.5.1")
+@pytest.mark.cwe("611")
+@pytest.mark.parametrize("fixture_name", _XXE_FIXTURES, ids=list(_XXE_FIXTURES))
+def test_xxe_external_entity(fixture_name, profile, evidence):
+    """XML endpoints must not resolve external entities (XXE).
+
+    Posts a classic file-disclosure entity and an out-of-band parameter-entity
+    payload to each profile-declared XML endpoint. A hardened parser disables
+    DOCTYPE/external-entity processing: the entity must NOT resolve, so no local
+    file content is reflected and no outbound fetch is triggered (ASVS V1.5.1,
+    CWE-611). Skips cleanly when the profile declares no XML-capable endpoint.
+    """
+    xml_endpoints = _xml_capable_endpoints(profile)
+    if not xml_endpoints:
+        pytest.skip(
+            "No XML-capable endpoint in profile (declare an endpoint with "
+            "format: xml / content_type: application/xml, or an xml upload "
+            "format, to enable the V1.5.1 XXE probe)."
+        )
+
+    fixture_path = _FIXTURES / fixture_name
+    if not fixture_path.exists():
+        pytest.skip(f"XXE fixture not found: {fixture_path}")
+    xml_bytes = fixture_path.read_bytes()
+
+    for ep in xml_endpoints:
+        path = ep.get("path", "")
+        method = ep.get("method", "POST")
+        url = _endpoint_url(profile, path)
+        headers = {"Content-Type": "application/xml"}
+        resp = send_request(method, url, headers=headers, content=xml_bytes, timeout=20.0)
+        context = f"{method} {path} ({fixture_name})"
+        _assert_safe_status(resp, context)
+
+        body = resp.text
+        for marker in _XXE_LEAK_MARKERS:
+            assert marker not in body, (
+                f"{context}: response reflected file-disclosure marker "
+                f"{marker!r} — the XML parser resolved an external entity "
+                "(ASVS V1.5.1, CWE-611)."
+            )
+        # The literal entity name must not be reflected resolved-or-raw in a way
+        # that suggests the parser processed the DOCTYPE.
+        if "root:" in body or "[fonts]" in body:
+            evidence.capture(resp, f"xxe_{path.lstrip('/')}_{fixture_name}_leak_review")
+        if resp.status_code not in (200, 400, 401, 403, 415, 422):
+            evidence.capture(
+                resp, f"xxe_{path.lstrip('/')}_{fixture_name}_status_{resp.status_code}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# SSRF — internal / metadata target dereference (ASVS V1.3.6 / V15.3.2, CWE-918)
+# ---------------------------------------------------------------------------
+# HARD PRECONDITION (plan §P1-F): SSRF makes the TARGET initiate outbound
+# connections to internal/metadata addresses — a distinct trust boundary that
+# SECURITY.md does not yet authorize. The live probe MUST NOT fire until both an
+# explicit env acknowledgment (SSRF_PROBE_ACK=1) AND written SSRF authorization
+# language in SECURITY.md exist. The gate below mirrors the --yes/PENTEST_MODE
+# pattern: absent the ack, the test skips with the precondition reason.
+
+_SSRF_ACK_ENV = "SSRF_PROBE_ACK"
+_SSRF_SKIP_REASON = (
+    "SSRF probe gated: SECURITY.md must first gain explicit 'SSRF / "
+    "internal-network probing' authorization language, and the acknowledgment "
+    "gate (SSRF_PROBE_ACK=1) plus written authorization are required before a "
+    "live run. SSRF causes the TARGET to open outbound connections to internal/"
+    "metadata addresses (a distinct trust boundary); the probe and its offline "
+    "fixtures (fixtures/ssrf_targets.txt) ship, but live firing stays gated."
+)
+
+
+def _load_ssrf_targets() -> list[str]:
+    """Read SSRF target URLs from the reviewable offline fixture.
+
+    Comment (`#`) and blank lines are skipped. Returns an empty list if the
+    fixture is missing (the test then skips).
+    """
+    fixture_path = _FIXTURES / "ssrf_targets.txt"
+    if not fixture_path.exists():
+        return []
+    targets: list[str] = []
+    for line in fixture_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        targets.append(stripped)
+    return targets
+
+
+# Reflected-content markers that prove the server dereferenced an internal URL.
+_SSRF_LEAK_MARKERS = (
+    "ami-id",                 # EC2 metadata document keys
+    "instance-id",
+    "security-credentials",
+    "iam/security-credentials",
+    "computeMetadata",        # GCP metadata
+    "root:x:0:0:",            # file:///etc/passwd
+    "[fonts]",                # file:///c:/windows/win.ini
+    "for 16-bit app support",
+)
+
+# Endpoints carrying at least one URL-shaped field (SSRF sinks).
+_SSRF_ENDPOINTS = [
+    ep for ep in _ALL_ENDPOINTS_WITH_PROBE
+    if any(_is_url_field(f) for f in (ep.get("probe_body") or {}).keys())
+]
+
+
+@pytest.mark.asvs_extended
+@pytest.mark.asvs("1.3.6")
+@pytest.mark.asvs("15.3.2")
+@pytest.mark.cwe("918")
+@pytest.mark.parametrize(
+    "endpoint",
+    _SSRF_ENDPOINTS,
+    ids=[_endpoint_id(e) for e in _SSRF_ENDPOINTS],
+)
+def test_ssrf_internal_targets(endpoint, profile, evidence):
+    """URL-accepting endpoints must not dereference internal/metadata targets.
+
+    Submits internal/loopback/link-local-metadata/file:// URLs (from the
+    reviewable fixture) into each URL-shaped field and checks the server does
+    not fetch them: no metadata document, no local-file content reflected
+    (ASVS V1.3.6 / V15.3.2, CWE-918).
+
+    HARD GATE: this live probe stays SKIPPED unless ``SSRF_PROBE_ACK=1`` is set.
+    The acknowledgment exists because SSRF makes the target open outbound
+    connections to internal addresses, which SECURITY.md does not yet authorize.
+    Both the env ack and written SSRF authorization in SECURITY.md are required
+    before firing this against any target.
+    """
+    if os.environ.get(_SSRF_ACK_ENV) != "1":
+        pytest.skip(_SSRF_SKIP_REASON)
+
+    from conftest import probe_body_for
+    path = endpoint.get("path", "")
+    method = endpoint.get("method", "POST")
+    url = _endpoint_url(profile, path)
+    base_body = probe_body_for(endpoint)
+
+    url_fields = [f for f in base_body.keys() if _is_url_field(f)]
+    if not url_fields:
+        pytest.skip(f"{path}: no URL-shaped field to target for SSRF")
+
+    targets = _load_ssrf_targets()
+    if not targets:
+        pytest.skip("SSRF target fixture missing/empty (fixtures/ssrf_targets.txt)")
+
+    for field in url_fields:
+        for target in targets:
+            injected = dict(base_body)
+            injected[field] = target
+            context = f"{method} {path} {field}={target!r}"
+            resp = send_request(method, url, json_body=injected, timeout=20.0)
+            _assert_safe_status(resp, context)
+
+            body = resp.text
+            for marker in _SSRF_LEAK_MARKERS:
+                assert marker not in body, (
+                    f"{context}: response reflected internal-target content "
+                    f"{marker!r} — the server dereferenced the SSRF target "
+                    "(ASVS V1.3.6 / V15.3.2, CWE-918)."
+                )
+            if resp.status_code not in (200, 400, 401, 403, 422):
+                evidence.capture(
+                    resp, f"ssrf_{path.lstrip('/')}_{field}_status_{resp.status_code}"
+                )

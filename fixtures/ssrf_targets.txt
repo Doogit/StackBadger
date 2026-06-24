@@ -1,0 +1,40 @@
+# SSRF target payloads — internal / link-local / metadata / local-file URLs.
+#
+# Reviewable payload set for the CWE-918 SSRF probe (ASVS V1.3.6 / V15.3.2).
+# Each line is one URL submitted to a profile-derived endpoint/RPC that accepts
+# a URL or fetches remote content. A safe server MUST NOT dereference any of
+# these: no metadata document, no local-file content, and no successful fetch
+# of an internal address may be reflected in the response.
+#
+# Lines beginning with '#' and blank lines are comments and are skipped by the
+# loader. These addresses are NON-ROUTABLE / reserved-internal by design; the
+# probe only SENDS them as request data — it never connects to them from the
+# harness. Whether the TARGET connects outbound is gated separately by
+# SSRF_PROBE_ACK (see tests/test_injection.py).
+
+# --- Cloud instance-metadata services (link-local 169.254.169.254) ---
+http://169.254.169.254/latest/meta-data/
+http://169.254.169.254/latest/meta-data/iam/security-credentials/
+http://[fd00:ec2::254]/latest/meta-data/
+http://metadata.google.internal/computeMetadata/v1/
+
+# --- Loopback / localhost (commonly trusted by internal services) ---
+http://localhost
+http://localhost:80/
+http://127.0.0.1
+http://127.0.0.1:6379/
+http://[::1]/
+
+# --- Private RFC 1918 ranges ---
+http://10.0.0.1/
+http://192.168.0.1/
+http://172.16.0.1/
+
+# --- Local-file scheme (read a server-side file via a URL fetcher) ---
+file:///etc/passwd
+file:///c:/windows/win.ini
+
+# --- Alternate-encoding bypasses for naive allowlists ---
+http://0177.0.0.1/
+http://2130706433/
+http://[0:0:0:0:0:ffff:127.0.0.1]/

