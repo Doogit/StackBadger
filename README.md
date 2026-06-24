@@ -337,6 +337,7 @@ accounts are deleted the same way they were created (dashboard).
 | `SUPABASE_PROJECT_URL` / `SUPABASE_ANON_KEY` | Supabase |
 | `CLERK_FAPI_HOST` | Clerk |
 | `FIREBASE_API_KEY` | Firebase |
+| `OAUTH_AUTHORIZE_URL` / `OAUTH_TOKEN_ENDPOINT` | OAuth delegated-send (repoint `oauth.delegated_send` at a staging BFF for one run) |
 
 Missing config causes the dependent tests to **skip**, not fail.
 
