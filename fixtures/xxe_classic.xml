@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Classic XXE: file-disclosure via an external general entity.
+     A safe parser MUST NOT resolve &xxe; — the file contents must never
+     appear in the response. The placeholder file path is a Unix-canonical
+     read target; on Windows hosts the equivalent file:///c:/windows/win.ini
+     variant is exercised in the test payload list, not committed here. -->
+<!DOCTYPE records [
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<records>
+  <record>
+    <id>STAGE-XXE-CLASSIC</id>
+    <value>&xxe;</value>
+  </record>
+</records>

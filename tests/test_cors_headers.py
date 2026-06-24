@@ -29,7 +29,8 @@ if str(_PKG_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_PKG_ROOT))
 
 from profile import load_profile, resolve_profile_path  # noqa: E402
-from helpers import netlify_url  # noqa: E402
+from helpers import FakeResponse, cache_control_is_safe, netlify_url  # noqa: E402
+from conftest import first_endpoint, probe_body_for  # noqa: E402
 
 
 def _collection_profile():
@@ -390,4 +391,68 @@ class TestClerkCookieFlags:
         assert not failures, (
             "Clerk cookie flag issues detected:\n"
             + "\n".join(f"  - {f}" for f in failures)
+        )
+
+
+# ---------------------------------------------------------------------------
+# Cache-Control on authenticated responses (ASVS V14.3.2, CWE-524)
+# ---------------------------------------------------------------------------
+
+class TestAuthenticatedResponseCaching:
+    """Authenticated responses must not be cacheable (no-store / no-cache / private).
+
+    A sensitive, per-user response that lacks a restrictive Cache-Control may be
+    written to a shared proxy or the browser disk cache and read back by a later
+    user of the same machine or network (CWE-524). ASVS V14.3.2 requires
+    sensitive responses carry Cache-Control: no-store (no-cache / private are
+    accepted as adequate).
+    """
+
+    @pytest.mark.asvs("14.3.2")
+    @pytest.mark.cwe("524")
+    def test_authenticated_response_is_not_cacheable(
+        self, profile, user_a_client, evidence
+    ):
+        """The first authenticated endpoint must return a non-cacheable response.
+
+        The authenticated endpoint is derived from the profile
+        (``first_endpoint(profile, "authenticated")``); skips cleanly when the
+        profile declares none. Uses the signed-in user_a client so the response
+        is genuinely sensitive/per-user.
+        """
+        endpoint = first_endpoint(profile, "authenticated")
+        path = endpoint["path"]
+        method = (endpoint.get("method") or "POST").upper()
+        body = probe_body_for(endpoint)
+        url = netlify_url(profile, path)
+
+        try:
+            resp = user_a_client.request(method, url, json=body, timeout=15)
+        except httpx.HTTPError as exc:
+            pytest.skip(
+                f"Authenticated endpoint {path} unreachable "
+                f"({type(exc).__name__}) — cannot check cache hygiene"
+            )
+
+        cache_control = resp.headers.get("cache-control", "")
+        safe = cache_control_is_safe(cache_control)
+
+        if not safe:
+            # Capture headers only — the body may carry per-user PII we must not
+            # persist. Mirror test_session's sanitized FakeResponse pattern.
+            evidence.capture(
+                FakeResponse(
+                    resp.status_code, url,
+                    f"[body omitted] Cache-Control: {cache_control or '(absent)'}",
+                    method,
+                ),
+                label=f"{path.lstrip('/')}_cacheable_authenticated_response",
+            )
+
+        assert safe, (
+            f"Authenticated response at {path} returned "
+            f"Cache-Control: {cache_control or '(absent)'!r}. Sensitive per-user "
+            "responses must set no-store (or no-cache / private) so credentials "
+            "and PII are not written to shared or browser caches "
+            "(ASVS V14.3.2, CWE-524)."
         )
