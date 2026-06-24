@@ -410,16 +410,18 @@ def test_new_token_issued_on_authentication(profile, evidence):
 
     assert cred_one and cred_two, "Could not capture two session credentials"
 
-    # If the adapter is serving a STATIC pre-obtained JWT from the env-var
+    # If the adapter actually SERVED a static pre-obtained JWT from the env-var
     # fallback (FAPI/GoTrue unreachable or rate-limited), both sign-ins return
     # the same bytes — a harness artifact, not a target session-fixation flaw.
-    # Skip rather than raise a false positive. A genuine fixed session (no env
-    # fallback configured) still fails the assertion below.
-    if cred_one == cred_two and _env_jwt_fallback_configured():
+    # Skip only when the captured credential IS that env JWT (not merely when the
+    # env var happens to be set): with a live sign-in path, a genuine token-reuse
+    # fixation bug must still fail the assertion below even if the fallback var
+    # is also exported.
+    if cred_one == cred_two and _is_static_env_jwt_credential(cred_one):
         pytest.skip(
-            "Identical credentials but a static PENTEST_USER_A_JWT env fallback "
-            "is configured; cannot observe per-authentication token rotation "
-            "(the IdP sign-in path was unavailable). Not a finding."
+            "Identical credentials served from the static PENTEST_USER_A_JWT env "
+            "fallback (the IdP sign-in path was unavailable); cannot observe "
+            "per-authentication token rotation. Not a finding."
         )
 
     assert cred_one != cred_two, (
@@ -430,10 +432,16 @@ def test_new_token_issued_on_authentication(profile, evidence):
     )
 
 
-def _env_jwt_fallback_configured() -> bool:
-    """True when a static pre-obtained JWT is set for user_a (adapter fallback)."""
+def _is_static_env_jwt_credential(cred: str) -> bool:
+    """True when *cred* is the static PENTEST_USER_A_JWT fallback (actually used).
+
+    The adapter falls back to this pre-obtained JWT only when live sign-in is
+    unavailable. Matching the credential to the env value (not just its presence)
+    distinguishes 'fallback in effect' from a real reused-token fixation finding.
+    """
     import os
-    return bool(os.environ.get("PENTEST_USER_A_JWT"))
+    env_jwt = os.environ.get("PENTEST_USER_A_JWT")
+    return bool(env_jwt) and cred == f"Bearer {env_jwt}"
 
 
 def _capture_credential(profile) -> str:
@@ -492,26 +500,46 @@ def test_reauth_required_for_sensitive_change(profile, user_a_client, evidence):
         "sensitive_change_without_reauth",
     )
 
-    step_up = _signals_step_up(resp)
+    status = resp.status_code
+
+    # A status/header challenge is reliable proof the change was NOT applied and
+    # re-auth was demanded. Body-text markers are NOT trusted for the applied
+    # decision: a 2xx that already APPLIED the change could coincidentally carry
+    # a step-up phrase (a generic UI string), which would otherwise silently
+    # suppress a real V7.5.1 finding.
+    if status in (401, 403) or _header_signals_step_up(resp):
+        return  # re-auth enforced — control present.
 
     # A 400/422 likely means the synthetic probe body was rejected by input
-    # validation BEFORE any re-auth check ran — that proves nothing about
-    # re-auth enforcement, so treat it as inconclusive (skip), never a pass.
-    if resp.status_code in (400, 422) and not step_up:
+    # validation BEFORE any re-auth check ran — proves nothing about re-auth, so
+    # treat it as inconclusive (skip), never a pass.
+    if status in (400, 422):
         pytest.skip(
-            f"Sensitive-change probe at {path} returned HTTP {resp.status_code} "
-            "(likely input-validation rejection of the synthetic body); cannot "
-            "determine whether re-auth is enforced. Supply a valid probe_body "
-            "to make this conclusive."
+            f"Sensitive-change probe at {path} returned HTTP {status} (likely "
+            "input-validation rejection of the synthetic body); cannot determine "
+            "whether re-auth is enforced. Supply a valid probe_body to make this "
+            "conclusive."
         )
 
-    # A re-auth challenge is any 401/403, or a 2xx that explicitly signals a
-    # step-up requirement. A plain 2xx success means the change was applied with
-    # no re-auth — the finding.
-    applied = 200 <= resp.status_code < 300 and not step_up
+    # A 2xx that carries a body step-up phrase but NO status/header challenge is
+    # ambiguous — it could be a client-rendered re-auth prompt OR an applied
+    # change whose body merely mentions re-auth. Skip as inconclusive rather than
+    # risk a false negative (silently passing an applied change) or a false
+    # positive (failing a genuine 200 step-up prompt).
+    if 200 <= status < 300 and _body_signals_step_up(resp):
+        pytest.skip(
+            f"Sensitive-change probe at {path} returned HTTP {status} with a "
+            "step-up phrase in the body but no status/header challenge; cannot "
+            "distinguish an applied change from a client-rendered re-auth prompt. "
+            "Verify re-auth enforcement manually."
+        )
+
+    # A plain 2xx with no challenge of any kind means the change was applied
+    # without re-authentication — the finding.
+    applied = 200 <= status < 300
     assert not applied, (
-        f"Sensitive change at {path} was applied (HTTP {resp.status_code}) "
-        "without requiring re-authentication. Sensitive account changes "
+        f"Sensitive change at {path} was applied (HTTP {status}) without "
+        "requiring re-authentication. Sensitive account changes "
         "(password/email/MFA) must re-verify the user's identity (ASVS "
         "V7.5.1, CWE-384)."
     )
@@ -532,16 +560,28 @@ def _find_sensitive_change_endpoint(profile):
     return None
 
 
-def _signals_step_up(resp) -> bool:
-    """True when a response explicitly asks for re-authentication / step-up."""
-    body = _safe_text(resp).lower()
-    markers = (
-        "reauth", "re-auth", "re-authenticate", "step-up", "step up",
-        "verify your identity", "confirm your password", "recent login",
-        "requires recent authentication", "password_confirmation_required",
-    )
-    if any(m in body for m in markers):
-        return True
-    # WWW-Authenticate / a step-up challenge header.
+_STEP_UP_BODY_MARKERS = (
+    "reauth", "re-auth", "re-authenticate", "step-up", "step up",
+    "verify your identity", "confirm your password", "recent login",
+    "requires recent authentication", "password_confirmation_required",
+)
+
+
+def _header_signals_step_up(resp) -> bool:
+    """True when a WWW-Authenticate header demands re-auth / step-up.
+
+    Header/status signals are authoritative for the 'applied' decision; body
+    text is not (see _body_signals_step_up).
+    """
     www_auth = resp.headers.get("www-authenticate", "").lower()
     return "reauth" in www_auth or "step" in www_auth
+
+
+def _body_signals_step_up(resp) -> bool:
+    """True when the response BODY mentions a re-authentication / step-up prompt.
+
+    Advisory only: a body marker on a 2xx is ambiguous (an applied change may
+    also mention re-auth), so callers treat it as inconclusive, not proof.
+    """
+    body = _safe_text(resp).lower()
+    return any(m in body for m in _STEP_UP_BODY_MARKERS)

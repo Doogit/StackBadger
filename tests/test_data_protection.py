@@ -182,10 +182,21 @@ def _scan_url_for_secrets(url: str) -> tuple[list[str], list[str]]:
                 f"sensitive query parameter '{m.group(1).lower()}=' present in URL"
             )
         for m in _AMBIGUOUS_KV_RE.finditer(target):
+            key = m.group(1).lower()
             value = m.group(2)
-            if _JWT_RE.search(value) or _HIGH_ENTROPY_VALUE_RE.match(value):
+            if _JWT_RE.search(value):
                 high.append(
-                    f"ambiguous parameter '{m.group(1).lower()}=' carries a "
+                    f"ambiguous parameter '{key}=' carries a JWT in URL"
+                )
+            elif key == "code":
+                # An OAuth authorization code is expected in a redirect URL by
+                # design (single-use, short-lived) and is high-entropy, so
+                # entropy alone is NOT a CWE-598 leak — only a JWT mis-placed
+                # under ?code= (handled above) escalates. Record, don't escalate.
+                low.append("OAuth authorization-code parameter present in URL (expected)")
+            elif _HIGH_ENTROPY_VALUE_RE.match(value):
+                high.append(
+                    f"ambiguous parameter '{key}=' carries a "
                     "secret-shaped value in URL"
                 )
         if _JWT_RE.search(target):
@@ -480,3 +491,36 @@ def test_referrer_policy_limits_url_leakage(profile, evidence):
         "origins (ASVS V14.3.3, CWE-200). Per-host defaults differ; set it "
         "explicitly rather than relying on the host."
     )
+
+
+# ---------------------------------------------------------------------------
+# Offline unit tests for the URL secret scanner (no live target).
+# Locks the HIGH/ambiguous split so the false-positive (benign long ?code=) and
+# false-negative (encoded / #fragment token) fixes cannot silently regress.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "url,expect_high,expect_low",
+    [
+        # Benign long OAuth authorization code: high-entropy by design, expected
+        # in a redirect URL -> NOT a HIGH leak (regression guard for the FP fix).
+        ("https://app.example/cb?code=" + "4Ab" * 20 + "&state=xyz", False, True),
+        # HIGH-confidence key -> escalates.
+        ("https://app.example/cb?access_token=abc123def456", True, False),
+        # Implicit-flow token in the URL FRAGMENT -> must still be caught.
+        ("https://app.example/#access_token=eyJhbGciOi.payload12.sig34567", True, False),
+        # A JWT mis-placed under ?code= -> escalates (only JWT, not entropy).
+        ("https://app.example/p?code=eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2", True, False),
+        # High-entropy value under a non-code ambiguous key -> escalates.
+        ("https://app.example/p?token=" + "Zk9" * 16, True, False),
+        # Percent-encoded email (PII) -> low, not high.
+        ("https://app.example/p?ref=user%40example.com", False, True),
+        # Fully benign.
+        ("https://app.example/p?q=hello&page=2", False, False),
+        ("", False, False),
+    ],
+)
+def test_scan_url_for_secrets_classifies(url, expect_high, expect_low):
+    high, low = _scan_url_for_secrets(url)
+    assert bool(high) == expect_high, f"high={high!r} for {url!r}"
+    assert bool(low) == expect_low, f"low={low!r} for {url!r}"

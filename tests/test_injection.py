@@ -24,6 +24,7 @@ import sys as _sys
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -442,6 +443,12 @@ _OSCMD_DELAY_THRESHOLD = 4.0
 # for minutes.
 _OSCMD_TIME_BUDGET = 60.0
 
+# Arithmetic-evaluation reflection oracle. Only a shell that evaluates the
+# injected command turns ``$((6*7))`` into 42, so asserting on the EVALUATED
+# result (not a literal marker) is immune to endpoints that merely echo input.
+_OSCMD_ARITH_MARKER = "SB$((6*7))END"
+_OSCMD_ARITH_RESULT = "SB42END"
+
 _OSCMD_PAYLOADS: list[str] = [
     # POSIX shell sinks.
     f"; sleep {_OSCMD_DELAY}",
@@ -455,8 +462,12 @@ _OSCMD_PAYLOADS: list[str] = [
     # `timeout` are the native delay forms so both sinks are covered).
     f"& ping -n {_OSCMD_DELAY} 127.0.0.1",
     f"& timeout /t {_OSCMD_DELAY}",
-    # Reflection oracle (shell echo proves substitution, both platforms).
-    "; echo stackbadger-oscmd-marker",
+    # Arithmetic-evaluation oracle: only a shell that evaluates the injected
+    # command turns `$((6*7))` into 42. A handler that merely REFLECTS the input
+    # echoes the literal `SB$((6*7))END`, which can never contain `SB42END` — so
+    # this avoids the false positive of a plain echo/validation endpoint that
+    # reflects the marker without running a shell.
+    f"; echo {_OSCMD_ARITH_MARKER}",
 ]
 
 # Endpoints carrying at least one free-text field (OS-command injection sinks).
@@ -532,10 +543,13 @@ def test_oscmd_injection_time_oracle(endpoint, profile, evidence):
             resp, inj_elapsed, benign_elapsed, delta = _benign_then_injected(field, payload)
 
             _assert_safe_status(resp, context)
-            # The command marker must not be echoed (would prove substitution).
-            assert "stackbadger-oscmd-marker" not in resp.text, (
-                f"{context}: response echoed the OS-command marker — the shell "
-                "evaluated the injected `echo` (ASVS V1.2.5, CWE-78)."
+            # The EVALUATED arithmetic result proves shell substitution; a plain
+            # echo/validation endpoint reflects the literal `SB$((6*7))END`, which
+            # cannot contain `SB42END`, so reflection alone does not trip this.
+            assert _OSCMD_ARITH_RESULT not in resp.text, (
+                f"{context}: response contained the evaluated arithmetic result "
+                f"{_OSCMD_ARITH_RESULT!r} — the shell evaluated the injected "
+                "`echo` (ASVS V1.2.5, CWE-78)."
             )
 
             if _is_timing_payload(payload):
@@ -714,14 +728,22 @@ def _load_ssrf_targets() -> list[str]:
     return targets
 
 
-# Reflected-content markers that prove the server dereferenced an internal URL.
+# Markers that prove the server dereferenced an internal URL — these are RESPONSE
+# CONTENT (metadata-document keys, credential fields, file contents), NOT URL-path
+# fragments. URL-path fragments like "security-credentials" were removed because
+# they appear in the injected target itself, so an endpoint that echoes the
+# request URL in an error page would trip a false positive. The injected target
+# is additionally stripped from the body before matching (see the probe).
 _SSRF_LEAK_MARKERS = (
-    "ami-id",                 # EC2 metadata document keys
+    "ami-id",                 # EC2 IMDS document keys
     "instance-id",
-    "security-credentials",
-    "iam/security-credentials",
+    "instance-type",
+    "AccessKeyId",            # IAM security-credentials response body
+    "SecretAccessKey",
     "computeMetadata",        # GCP metadata
     "root:x:0:0:",            # file:///etc/passwd
+    "root:!:0:0:",
+    "root::0:0:",
     "[fonts]",                # file:///c:/windows/win.ini
     "for 16-bit app support",
 )
@@ -781,7 +803,13 @@ def test_ssrf_internal_targets(endpoint, profile, evidence):
             resp = send_request(method, url, json_body=injected, timeout=20.0)
             _assert_safe_status(resp, context)
 
-            body = resp.text
+            # Strip any verbatim echo of the injected target (and its decoded
+            # form) so a URL-reflecting error page that quotes the request URL
+            # cannot be mistaken for an actual dereference.
+            body = resp.text.replace(target, "")
+            decoded_target = unquote(target)
+            if decoded_target != target:
+                body = body.replace(decoded_target, "")
             for marker in _SSRF_LEAK_MARKERS:
                 assert marker not in body, (
                     f"{context}: response reflected internal-target content "
