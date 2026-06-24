@@ -31,5 +31,6 @@ profiles/*.yaml
 AUTHORIZATION.md
 roe/
 
-# Claude Code (personal, machine-local)
-.claude/settings.local.json
+# Claude Code workspace config (local only — not for publication)
+.claude/
+CLAUDE.md
