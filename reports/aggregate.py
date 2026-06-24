@@ -68,6 +68,7 @@ TEST_SEVERITY_MAP: dict[str, str] = {
     "test_s3_storage": "HIGH",
     "test_webhook_paddle": "HIGH",
     "test_webhook_lemonsqueezy": "MEDIUM",    # replay finding is MEDIUM
+    "test_session": "HIGH",                   # V7.4.1 logout/fixation are L1 HIGH
 }
 
 # Per-test severity overrides (test function name → severity).
@@ -139,6 +140,7 @@ TEST_CATEGORY_MAP: dict[str, str] = {
     "test_s3_storage": "s3_storage",
     "test_webhook_paddle": "webhook_paddle",
     "test_webhook_lemonsqueezy": "webhook_lemonsqueezy",
+    "test_session": "session",
 }
 
 # ZAP alert name → endpoint path heuristic
@@ -194,6 +196,7 @@ _CATEGORY_PREFIXES: dict[str, str] = {
     "s3_storage": "S3ST",
     "webhook_paddle": "PADL",
     "webhook_lemonsqueezy": "LMSQ",
+    "session": "SESS",
 }
 
 # Provider layer categories (direct-API tests, not app endpoints)
@@ -474,6 +477,13 @@ def _remediation_for_category(category: str, severity: str, stack_info: dict) ->
             "Log full errors server-side only."
         ),
         "anon_session": anon_text,
+        "session": (
+            "Invalidate sessions server-side on logout — revoke the refresh "
+            "token and clear the session record so a captured credential cannot "
+            "be replayed. Issue a fresh session token on every authentication "
+            "(never reuse a pre-auth token). Require recent re-authentication "
+            "before sensitive account changes (password, email, MFA)."
+        ),
         "zap": (
             "Review the flagged endpoint and apply the remediation recommended by the ZAP alert. "
             "Consult OWASP guidance for the specific vulnerability class."
@@ -518,6 +528,7 @@ def _root_cause_for_category(category: str) -> str:
         "cors_headers": "Missing or permissive security response headers allow cross-origin attacks or information leakage.",
         "info_disclosure": "Error responses expose internal implementation details, stack traces, or server configuration.",
         "anon_session": "Anonymous session merge RPC can be triggered without adequate ownership validation.",
+        "session": "Session not invalidated on logout, reused across authentications, or sensitive changes allowed without re-authentication.",
         "zap": "Vulnerability identified by automated ZAP scanner; see alert details.",
         "firebase_auth": "Firebase Auth adapter detected a blocking condition (MFA, App Check).",
         "firestore_rules": "Firestore Security Rules misconfigured — allows unauthorized read/write.",
@@ -605,6 +616,12 @@ def _why_it_matters_for_category(category: str) -> str:
         "anon_session": (
             "Merging anonymous session data without validation can allow an attacker to "
             "inject malicious data into a legitimate user's account."
+        ),
+        "session": (
+            "A session that survives logout lets a stolen or shared credential be "
+            "replayed indefinitely. A reused or fixable session token enables "
+            "session fixation, and unguarded sensitive changes let an attacker who "
+            "briefly holds a session permanently take over the account."
         ),
         "zap": (
             "This vulnerability class can be exploited to compromise application "
