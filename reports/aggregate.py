@@ -69,6 +69,7 @@ TEST_SEVERITY_MAP: dict[str, str] = {
     "test_webhook_paddle": "HIGH",
     "test_webhook_lemonsqueezy": "MEDIUM",    # replay finding is MEDIUM
     "test_session": "HIGH",                   # V7.4.1 logout/fixation are L1 HIGH
+    "test_data_protection": "MEDIUM",         # no-store is MEDIUM; token-in-URL self-escalates to HIGH inline
 }
 
 # Per-test severity overrides (test function name → severity).
@@ -141,6 +142,7 @@ TEST_CATEGORY_MAP: dict[str, str] = {
     "test_webhook_paddle": "webhook_paddle",
     "test_webhook_lemonsqueezy": "webhook_lemonsqueezy",
     "test_session": "session",
+    "test_data_protection": "data_protection",
 }
 
 # ZAP alert name → endpoint path heuristic
@@ -197,6 +199,7 @@ _CATEGORY_PREFIXES: dict[str, str] = {
     "webhook_paddle": "PADL",
     "webhook_lemonsqueezy": "LMSQ",
     "session": "SESS",
+    "data_protection": "DATAP",
 }
 
 # Provider layer categories (direct-API tests, not app endpoints)
@@ -477,6 +480,17 @@ def _remediation_for_category(category: str, severity: str, stack_info: dict) ->
             "Log full errors server-side only."
         ),
         "anon_session": anon_text,
+        "data_protection": (
+            "Set Cache-Control: no-store (or no-cache, private) on every "
+            "authenticated or sensitive response so credentials and PII are not "
+            "written to shared or browser caches. Never place tokens, API keys, "
+            "or PII in URLs, query strings, or redirect Location headers — carry "
+            "them in headers or POST bodies instead. Add Referrer-Policy: "
+            "strict-origin-when-cross-origin so URLs do not leak to third-party "
+            "origins. Header defaults differ per host (Netlify/Vercel/"
+            "Cloudflare); set these explicitly in your platform config rather "
+            "than relying on the host default."
+        ),
         "session": (
             "Invalidate sessions server-side on logout — revoke the refresh "
             "token and clear the session record so a captured credential cannot "
@@ -529,6 +543,7 @@ def _root_cause_for_category(category: str) -> str:
         "info_disclosure": "Error responses expose internal implementation details, stack traces, or server configuration.",
         "anon_session": "Anonymous session merge RPC can be triggered without adequate ownership validation.",
         "session": "Session not invalidated on logout, reused across authentications, or sensitive changes allowed without re-authentication.",
+        "data_protection": "Sensitive responses are cacheable (missing Cache-Control: no-store) or tokens/PII are exposed in URLs, query strings, or redirect Location headers.",
         "zap": "Vulnerability identified by automated ZAP scanner; see alert details.",
         "firebase_auth": "Firebase Auth adapter detected a blocking condition (MFA, App Check).",
         "firestore_rules": "Firestore Security Rules misconfigured — allows unauthorized read/write.",
@@ -622,6 +637,14 @@ def _why_it_matters_for_category(category: str) -> str:
             "replayed indefinitely. A reused or fixable session token enables "
             "session fixation, and unguarded sensitive changes let an attacker who "
             "briefly holds a session permanently take over the account."
+        ),
+        "data_protection": (
+            "A token or PII in a URL is written to browser history, server and "
+            "proxy access logs, and the Referer header sent to third-party "
+            "origins, so a single leaked URL can hand an attacker a live "
+            "credential. Sensitive responses cached by a shared proxy or the "
+            "browser disk cache can be read back by a later user of the same "
+            "machine or network, exposing other users' data."
         ),
         "zap": (
             "This vulnerability class can be exploited to compromise application "
