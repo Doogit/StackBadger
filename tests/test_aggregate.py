@@ -14,6 +14,7 @@ if str(_PKG_ROOT) not in sys.path:
 import pytest
 
 from reports.aggregate import (
+    _CATEGORY_PREFIXES,
     _PROVIDER_CATEGORIES,
     _PROVIDER_LAYER_MAP,
     _coverage_matrix,
@@ -24,6 +25,7 @@ from reports.aggregate import (
     _test_stem_from_nodeid,
     _why_it_matters_for_category,
     TEST_CATEGORY_MAP,
+    TEST_SEVERITY_MAP,
     build_evidence_findings,
     failed_test_names,
     load_evidence,
@@ -228,6 +230,31 @@ def test_provider_content_dicts_have_specific_entries(category):
     assert _remediation_for_category(category, "HIGH", {}) != generic_remediation
     assert _root_cause_for_category(category) != "Unclassified vulnerability."
     assert _why_it_matters_for_category(category) != "This vulnerability may impact application security."
+
+
+# Phase-1 ASVS probe modules MUST be fully wired into the ledger or their HIGH
+# findings silently downgrade to MEDIUM/api_surface and the run.sh exit-1 gate
+# breaks. Guard the full wiring (stem->severity, stem->category, category->prefix,
+# and non-generic content) so a typo or a dropped map entry fails offline.
+@pytest.mark.parametrize(
+    "stem,category,severity,prefix",
+    [
+        ("test_session", "session", "HIGH", "SESS"),
+        ("test_data_protection", "data_protection", "MEDIUM", "DATAP"),
+    ],
+)
+def test_phase1_modules_fully_wired_into_ledger(stem, category, severity, prefix):
+    assert TEST_SEVERITY_MAP.get(stem) == severity
+    assert TEST_CATEGORY_MAP.get(stem) == category
+    assert _CATEGORY_PREFIXES.get(category) == prefix
+    # Content dicts must return module-specific (non-generic) text.
+    assert _remediation_for_category(category, severity, {}) != (
+        "Review the flagged code path and apply secure coding best practices."
+    )
+    assert _root_cause_for_category(category) != "Unclassified vulnerability."
+    assert _why_it_matters_for_category(category) != (
+        "This vulnerability may impact application security."
+    )
 
 
 def test_coverage_matrix_excludes_provider_categories():

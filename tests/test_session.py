@@ -53,42 +53,41 @@ if str(_PKG_ROOT) not in _sys.path:
 
 from auth import create_adapter  # noqa: E402
 from auth.base import AuthConfigError  # noqa: E402
-from tests.conftest import endpoints_for_category, first_endpoint, probe_body_for  # noqa: E402
-from tests.helpers import FakeResponse, netlify_url  # noqa: E402
+from conftest import endpoints_for_category, probe_body_for  # noqa: E402
+from helpers import FakeResponse, auth_provider as _auth_provider, netlify_url, safe_text as _safe_text  # noqa: E402
 
 # Auth providers whose post-logout session invalidation is observable over the
 # wire by a black-box prober. Firebase is intentionally absent: revoking a
 # Firebase session requires the Admin SDK (``revokeRefreshTokens``), which has
 # no client-REST equivalent, so logout-invalidation is a Track-C attestation
-# there rather than a probe.
-_REVOCATION_OBSERVABLE = ("clerk", "firebase", "supabase-auth", "nextauth")
+# there rather than a probe (the explicit firebase skip in
+# test_session_invalidated_after_logout records that, and its absence here means
+# an accidental removal of that skip falls through to the unsupported-provider
+# skip rather than into a provider branch that cannot handle it).
+_REVOCATION_OBSERVABLE = ("clerk", "supabase-auth", "nextauth")
 
 # Path keywords that mark an authenticated endpoint as a *sensitive account
 # change* (password / email / MFA / account-security mutation) for the V7.5.1
 # re-authentication probe. Matched case-insensitively against the endpoint path.
+# Irreversible-destruction keywords (delete-account, deactivate) are deliberately
+# EXCLUDED: this probe submits the change with a valid session to observe whether
+# re-auth is enforced, so auto-targeting an account-destroying endpoint could wipe
+# the shared test account on a target that does not gate it. /delete-account is
+# additionally in DEFAULT_EXCLUDE_PATHS; we keep recoverable sensitive changes only.
 _SENSITIVE_CHANGE_KEYWORDS = (
     "password",
     "change-email",
     "update-email",
     "email-change",
-    "security",
     "mfa",
     "2fa",
     "two-factor",
-    "delete-account",
-    "deactivate",
-    "api-key",
-    "recovery",
 )
 
 
 # ---------------------------------------------------------------------------
 # Provider-agnostic throwaway session
 # ---------------------------------------------------------------------------
-
-def _auth_provider(profile) -> str:
-    return ((profile.stack and profile.stack.auth) or "").lower()
-
 
 def _fresh_adapter(profile):
     """Build a throwaway adapter and sign in user_a, or skip if unavailable.
@@ -100,7 +99,10 @@ def _fresh_adapter(profile):
         adapter = create_adapter(profile)
     except AuthConfigError as exc:
         pytest.skip(f"Session probe: auth adapter unavailable ({exc})")
-    # Force sign-in for user_a so the session state is populated.
+    # Force sign-in for user_a so the session state is populated. Any failure
+    # must close the adapter's httpx clients before propagating/skipping so a
+    # transient sign-in error (timeout, JSON decode, provider config) cannot
+    # leak the per-account clients — this runs twice for the rotation probe.
     try:
         adapter.get_headers("user_a")
     except AuthConfigError as exc:
@@ -112,6 +114,9 @@ def _fresh_adapter(profile):
         # reached if a provider raises unexpectedly; treat as not-runnable.
         _safe_close(adapter)
         pytest.skip("Session probe: provider does not expose a usable credential")
+    except Exception:
+        _safe_close(adapter)
+        raise
     return adapter
 
 
@@ -122,6 +127,18 @@ def _safe_close(adapter) -> None:
             close()
         except Exception:  # noqa: BLE001
             pass
+
+
+def _request_or_skip(fn, what: str):
+    """Run a live request thunk, converting a transport error into a clean skip.
+
+    A logout/replay probe that hits a DNS/timeout failure should skip (the
+    control is indeterminate), not surface a noisy test error.
+    """
+    try:
+        return fn()
+    except httpx.HTTPError as exc:
+        pytest.skip(f"Session probe: {what} failed (network error: {type(exc).__name__})")
 
 
 def _session_state(adapter, account: str = "user_a"):
@@ -162,24 +179,35 @@ def _supabase_logout_then_replay(adapter, evidence) -> tuple[bool, str]:
     gotrue_headers = {"apikey": anon_key, "Authorization": f"Bearer {access_token}"}
 
     # 1. Log out — revokes the refresh token / session server-side.
-    logout_resp = http.post(
-        f"{project_url}/auth/v1/logout",
-        headers=gotrue_headers,
-        timeout=15.0,
+    logout_resp = _request_or_skip(
+        lambda: http.post(
+            f"{project_url}/auth/v1/logout", headers=gotrue_headers, timeout=15.0
+        ),
+        "Supabase logout",
     )
     evidence.capture(
         FakeResponse(logout_resp.status_code, f"{project_url}/auth/v1/logout",
                      "[logout — body omitted]", "POST"),
         "supabase_logout",
     )
+    # If logout itself failed, the replay result is meaningless — a still-valid
+    # refresh token would reflect a failed logout, not a missing control.
+    if logout_resp.status_code not in (200, 204):
+        pytest.skip(
+            f"Supabase logout returned HTTP {logout_resp.status_code}; cannot "
+            "determine replay validity (logout did not complete)."
+        )
 
     # 2. Replay the OLD refresh token. A revoked session must reject it.
-    replay = http.post(
-        f"{project_url}/auth/v1/token?grant_type=refresh_token",
-        headers={"apikey": anon_key, "Authorization": f"Bearer {anon_key}",
-                 "Content-Type": "application/json"},
-        json={"refresh_token": refresh_token},
-        timeout=15.0,
+    replay = _request_or_skip(
+        lambda: http.post(
+            f"{project_url}/auth/v1/token?grant_type=refresh_token",
+            headers={"apikey": anon_key, "Authorization": f"Bearer {anon_key}",
+                     "Content-Type": "application/json"},
+            json={"refresh_token": refresh_token},
+            timeout=15.0,
+        ),
+        "Supabase refresh replay",
     )
     # Never persist the token-bearing refresh response body to evidence.
     evidence.capture(
@@ -211,10 +239,12 @@ def _clerk_logout_then_replay(adapter, evidence) -> tuple[bool, str]:
         base_headers["Origin"] = origin
 
     # 1. Sign out — remove this session from the client.
-    remove_resp = http.post(
-        f"{fapi_host}/v1/client/sessions/{session_id}/remove",
-        headers=base_headers,
-        timeout=15.0,
+    remove_resp = _request_or_skip(
+        lambda: http.post(
+            f"{fapi_host}/v1/client/sessions/{session_id}/remove",
+            headers=base_headers, timeout=15.0,
+        ),
+        "Clerk session remove",
     )
     evidence.capture(
         FakeResponse(remove_resp.status_code,
@@ -224,10 +254,12 @@ def _clerk_logout_then_replay(adapter, evidence) -> tuple[bool, str]:
     )
 
     # 2. Replay: attempt to mint a fresh token for the removed session.
-    mint = http.post(
-        f"{fapi_host}/v1/client/sessions/{session_id}/tokens",
-        headers=base_headers,
-        timeout=15.0,
+    mint = _request_or_skip(
+        lambda: http.post(
+            f"{fapi_host}/v1/client/sessions/{session_id}/tokens",
+            headers=base_headers, timeout=15.0,
+        ),
+        "Clerk token mint replay",
     )
     evidence.capture(
         FakeResponse(mint.status_code,
@@ -254,12 +286,15 @@ def _nextauth_logout_then_replay(adapter, evidence) -> tuple[bool, str]:
         pytest.skip("NextAuth session probe: no session client captured")
 
     # 1. Sign out via the Auth.js signout callback (CSRF-protected form POST).
-    signout_resp = http.post(
-        f"{base_url}/api/auth/signout",
-        data={"csrfToken": csrf_token or "", "callbackUrl": base_url, "json": "true"},
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=15.0,
-        follow_redirects=True,
+    signout_resp = _request_or_skip(
+        lambda: http.post(
+            f"{base_url}/api/auth/signout",
+            data={"csrfToken": csrf_token or "", "callbackUrl": base_url, "json": "true"},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=15.0,
+            follow_redirects=True,
+        ),
+        "NextAuth signout",
     )
     evidence.capture(
         FakeResponse(signout_resp.status_code, f"{base_url}/api/auth/signout",
@@ -268,7 +303,10 @@ def _nextauth_logout_then_replay(adapter, evidence) -> tuple[bool, str]:
     )
 
     # 2. Replay: the same client (cookie jar) must now report a userless session.
-    replay = http.get(f"{base_url}{session_path}", timeout=15.0)
+    replay = _request_or_skip(
+        lambda: http.get(f"{base_url}{session_path}", timeout=15.0),
+        "NextAuth session replay",
+    )
     body = _safe_text(replay)
     evidence.capture(
         FakeResponse(replay.status_code, f"{base_url}{session_path}",
@@ -280,13 +318,6 @@ def _nextauth_logout_then_replay(adapter, evidence) -> tuple[bool, str]:
         f"session endpoint after signout returned HTTP {replay.status_code}"
         + (" with a user object" if has_user else " (userless)")
     )
-
-
-def _safe_text(resp) -> str:
-    try:
-        return resp.text
-    except Exception:  # noqa: BLE001
-        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -345,6 +376,12 @@ def test_session_invalidated_after_logout(profile, evidence):
 # V7.2.4 — a new session token is issued on authentication
 # ---------------------------------------------------------------------------
 
+# No @write_probe: a sign-in establishes auth state at the IdP, not a mutation
+# of target application data. The harness treats sign-in as test infrastructure
+# (the shared auth_adapter signs in for every authenticated test without a
+# write-probe gate); the write_probe gate is reserved for INSERT/UPDATE/DELETE/
+# upload of app data and for the session-destroying logout/sensitive-change
+# probes below. Marking this would over-gate a read-only-safe rotation check.
 @pytest.mark.asvs_extended
 @pytest.mark.asvs("7.2.4")
 @pytest.mark.cwe("384")
@@ -372,12 +409,31 @@ def test_new_token_issued_on_authentication(profile, evidence):
     )
 
     assert cred_one and cred_two, "Could not capture two session credentials"
+
+    # If the adapter is serving a STATIC pre-obtained JWT from the env-var
+    # fallback (FAPI/GoTrue unreachable or rate-limited), both sign-ins return
+    # the same bytes — a harness artifact, not a target session-fixation flaw.
+    # Skip rather than raise a false positive. A genuine fixed session (no env
+    # fallback configured) still fails the assertion below.
+    if cred_one == cred_two and _env_jwt_fallback_configured():
+        pytest.skip(
+            "Identical credentials but a static PENTEST_USER_A_JWT env fallback "
+            "is configured; cannot observe per-authentication token rotation "
+            "(the IdP sign-in path was unavailable). Not a finding."
+        )
+
     assert cred_one != cred_two, (
         f"Two independent {provider} sign-ins returned an IDENTICAL session "
         "credential. A fresh session token must be issued on each "
         "authentication (ASVS V7.2.4, CWE-384) — a static credential enables "
         "session fixation."
     )
+
+
+def _env_jwt_fallback_configured() -> bool:
+    """True when a static pre-obtained JWT is set for user_a (adapter fallback)."""
+    import os
+    return bool(os.environ.get("PENTEST_USER_A_JWT"))
 
 
 def _capture_credential(profile) -> str:
@@ -424,31 +480,41 @@ def test_reauth_required_for_sensitive_change(profile, user_a_client, evidence):
     method = (endpoint.get("method") or "POST").upper()
     url = netlify_url(profile, path)
 
-    resp = user_a_client.request(method, url, json=body, timeout=15)
-    evidence.capture(resp, "sensitive_change_without_reauth")
+    resp = _request_or_skip(
+        lambda: user_a_client.request(method, url, json=body, timeout=15),
+        f"sensitive-change request to {path}",
+    )
+    # A sensitive-change response may echo a confirmation token or PII, so never
+    # persist its body — capture a sanitized record only (mirrors the module's
+    # no-secret-in-evidence invariant).
+    evidence.capture(
+        FakeResponse(resp.status_code, url, "[body omitted]", method),
+        "sensitive_change_without_reauth",
+    )
 
-    # A re-auth challenge is any 401/403, or a 200 that explicitly signals a
+    step_up = _signals_step_up(resp)
+
+    # A 400/422 likely means the synthetic probe body was rejected by input
+    # validation BEFORE any re-auth check ran — that proves nothing about
+    # re-auth enforcement, so treat it as inconclusive (skip), never a pass.
+    if resp.status_code in (400, 422) and not step_up:
+        pytest.skip(
+            f"Sensitive-change probe at {path} returned HTTP {resp.status_code} "
+            "(likely input-validation rejection of the synthetic body); cannot "
+            "determine whether re-auth is enforced. Supply a valid probe_body "
+            "to make this conclusive."
+        )
+
+    # A re-auth challenge is any 401/403, or a 2xx that explicitly signals a
     # step-up requirement. A plain 2xx success means the change was applied with
     # no re-auth — the finding.
-    challenged = resp.status_code in (401, 403) or _signals_step_up(resp)
-    applied = 200 <= resp.status_code < 300 and not _signals_step_up(resp)
-
+    applied = 200 <= resp.status_code < 300 and not step_up
     assert not applied, (
         f"Sensitive change at {path} was applied (HTTP {resp.status_code}) "
         "without requiring re-authentication. Sensitive account changes "
         "(password/email/MFA) must re-verify the user's identity (ASVS "
         "V7.5.1, CWE-384)."
     )
-    # If the endpoint rejected for an unrelated reason (e.g. 400/422 validation)
-    # we cannot conclude re-auth is enforced; record but do not fail.
-    if not challenged:
-        import warnings
-        warnings.warn(
-            f"Sensitive-change probe at {path} returned HTTP {resp.status_code}; "
-            "could not confirm a re-auth challenge (non-2xx, non-401/403). "
-            "Verify re-auth enforcement manually.",
-            stacklevel=1,
-        )
 
 
 def _find_sensitive_change_endpoint(profile):

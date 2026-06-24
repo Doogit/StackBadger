@@ -159,6 +159,35 @@ def is_spa_catchall(response: httpx.Response) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Shared predicates / accessors (single source of truth across probe modules)
+# ---------------------------------------------------------------------------
+
+
+def cache_control_is_safe(cache_control: str | None) -> bool:
+    """Return True when a Cache-Control value keeps a sensitive response out of caches.
+
+    Any of ``no-store`` / ``no-cache`` / ``private`` is accepted (ASVS V14.3.2,
+    CWE-524). Centralised here so every data-protection probe enforces identical
+    semantics rather than re-deriving the predicate per module.
+    """
+    cc = (cache_control or "").lower()
+    return "no-store" in cc or "no-cache" in cc or "private" in cc
+
+
+def auth_provider(profile) -> str:
+    """Return the active auth provider id (``profile.stack.auth``), lowercased."""
+    return ((profile.stack and profile.stack.auth) or "").lower()
+
+
+def safe_text(resp) -> str:
+    """Return ``resp.text``, swallowing decode/encoding errors as ``''``."""
+    try:
+        return resp.text
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Unified HTTP sender
 # ---------------------------------------------------------------------------
 

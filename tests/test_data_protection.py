@@ -41,7 +41,7 @@ from __future__ import annotations
 import re
 import sys as _sys
 from pathlib import Path as _Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import httpx
 import pytest
@@ -55,16 +55,22 @@ if str(_PKG_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_PKG_ROOT))
 
 from tests.conftest import endpoints_for_category, probe_body_for  # noqa: E402
-from tests.helpers import FakeResponse, netlify_url  # noqa: E402
+from tests.helpers import (  # noqa: E402
+    FakeResponse,
+    cache_control_is_safe,
+    netlify_url,
+)
 
 
 # ---------------------------------------------------------------------------
 # Secret / PII patterns scanned for in app-generated URLs and redirects
 # ---------------------------------------------------------------------------
 
-# Sensitive query-parameter NAMES (case-insensitive). A secret carried under one
-# of these keys in a URL is a CWE-598 finding regardless of the value shape.
-_SENSITIVE_PARAM_KEYS = (
+# HIGH-confidence sensitive query-parameter NAMES (case-insensitive). A value
+# carried under one of these keys in a URL is a CWE-598 finding regardless of the
+# value shape — the key name alone names a credential/secret/session, so we
+# self-escalate to HIGH. (A short OAuth ``code`` is deliberately NOT here.)
+_HIGH_PARAM_KEYS = (
     "access_token",
     "refresh_token",
     "id_token",
@@ -80,10 +86,18 @@ _SENSITIVE_PARAM_KEYS = (
     "sessionid",
     "session_id",
     "sid",
-    "token",
-    "auth",
     "authorization",
     "jwt",
+)
+
+# AMBIGUOUS parameter NAMES. These keys (``code``/``key``/``auth``/``token``)
+# routinely carry benign values: an OAuth authorization-code redirect
+# (``?code=...&state=...``), a publishable key, etc. A bare match here does NOT
+# self-escalate to HIGH; it only becomes a HIGH finding when the VALUE itself is
+# secret-shaped (a JWT or a long high-entropy token — see _scan_url_for_secrets).
+_AMBIGUOUS_PARAM_KEYS = (
+    "token",
+    "auth",
     "key",
     "code",
 )
@@ -95,9 +109,20 @@ _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{
 # A plausible email address (PII) appearing anywhere in the URL.
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 
-# ``key=value`` pairs whose KEY is sensitive — matched against the raw query.
-_SENSITIVE_KV_RE = re.compile(
-    r"(?i)(?:^|[?&#])(" + "|".join(re.escape(k) for k in _SENSITIVE_PARAM_KEYS) + r")=[^&#\s]+"
+# A long, high-entropy value — a credential-shaped string even without a JWT
+# header. Used to qualify an AMBIGUOUS key's value as secret-shaped (so a short
+# OAuth ``code`` does not fire, but a 40+ char opaque token does).
+_HIGH_ENTROPY_VALUE_RE = re.compile(r"^[A-Za-z0-9._~+/=-]{40,}$")
+
+# ``key=value`` pairs whose KEY is HIGH-confidence sensitive — self-escalates.
+_HIGH_KV_RE = re.compile(
+    r"(?i)(?:^|[?&#])(" + "|".join(re.escape(k) for k in _HIGH_PARAM_KEYS) + r")=([^&#\s]+)"
+)
+
+# ``key=value`` pairs whose KEY is AMBIGUOUS — only a finding if the value is
+# secret-shaped.
+_AMBIGUOUS_KV_RE = re.compile(
+    r"(?i)(?:^|[?&#])(" + "|".join(re.escape(k) for k in _AMBIGUOUS_PARAM_KEYS) + r")=([^&#\s]+)"
 )
 
 
@@ -117,28 +142,63 @@ def _sanitize_url(url: str) -> str:
     return f"{parts.scheme}://{parts.netloc}{parts.path}"
 
 
-def _scan_url_for_secrets(url: str) -> list[str]:
-    """Return a list of human-readable reasons a URL leaks a secret/PII, or [].
+def _scan_url_for_secrets(url: str) -> tuple[list[str], list[str]]:
+    """Scan a URL for secret/PII leakage. Return ``(high_reasons, low_reasons)``.
 
-    Scans the full URL (path + query + fragment). Reason strings deliberately
-    name the *kind* of leak, never the secret value.
+    Scans the full URL — path, query AND fragment — after percent-decoding, so
+    encoded params (``%65yJ...``) and implicit-flow ``#access_token=...``
+    fragments do not evade detection. Reason strings deliberately name the *kind*
+    of leak, never the secret value.
+
+    HIGH reasons self-escalate the finding to HIGH severity:
+      - a HIGH-confidence sensitive key (access_token, password, secret, ...),
+      - a JWT-shaped value under ANY key,
+      - an AMBIGUOUS key (code/key/auth/token) whose value is itself
+        secret-shaped (JWT or long high-entropy).
+
+    LOW reasons are recorded but do NOT escalate (e.g. an email address, or a
+    bare ``?code=<short>`` OAuth redirect that is benign on its own).
     """
-    reasons: list[str] = []
+    high: list[str] = []
+    low: list[str] = []
     if not url:
-        return reasons
-    parts = urlsplit(url)
-    query_and_fragment = f"{parts.query}#{parts.fragment}" if parts.fragment else parts.query
+        return high, low
 
-    for m in _SENSITIVE_KV_RE.finditer(url):
-        reasons.append(f"sensitive query parameter '{m.group(1).lower()}=' present in URL")
-    if _JWT_RE.search(url):
-        reasons.append("JWT-shaped token reflected in URL")
-    if _EMAIL_RE.search(url):
-        reasons.append("email address (PII) present in URL")
-    # De-duplicate while preserving order.
-    seen: set[str] = set()
-    unique = [r for r in reasons if not (r in seen or seen.add(r))]
-    return unique
+    # Percent-decode so encoded keys/values are matched, then also scan the
+    # fragment (implicit-flow ``#access_token=eyJ...``), which urlsplit() keeps
+    # out of ``query``.
+    decoded = unquote(url)
+    parts = urlsplit(decoded)
+    # Build the set of strings the regexes run against: the full decoded URL
+    # plus the fragment treated as a query-like ``key=value`` blob (prefixed
+    # with ``?`` so the ``(?:^|[?&#])`` anchor fires on its first pair).
+    scan_targets = [decoded]
+    if parts.fragment:
+        scan_targets.append("?" + parts.fragment)
+
+    for target in scan_targets:
+        for m in _HIGH_KV_RE.finditer(target):
+            high.append(
+                f"sensitive query parameter '{m.group(1).lower()}=' present in URL"
+            )
+        for m in _AMBIGUOUS_KV_RE.finditer(target):
+            value = m.group(2)
+            if _JWT_RE.search(value) or _HIGH_ENTROPY_VALUE_RE.match(value):
+                high.append(
+                    f"ambiguous parameter '{m.group(1).lower()}=' carries a "
+                    "secret-shaped value in URL"
+                )
+        if _JWT_RE.search(target):
+            high.append("JWT-shaped token reflected in URL")
+        if _EMAIL_RE.search(target):
+            low.append("email address (PII) present in URL")
+
+    # De-duplicate each list while preserving order.
+    def _dedup(items: list[str]) -> list[str]:
+        seen: set[str] = set()
+        return [r for r in items if not (r in seen or seen.add(r))]
+
+    return _dedup(high), _dedup(low)
 
 
 def _host_surface(profile) -> str:
@@ -159,12 +219,6 @@ def _host_surface(profile) -> str:
     # ``/api`` is used by Vercel, Cloudflare Pages Functions and many custom
     # stacks — ambiguous, so we do not guess.
     return "unknown"
-
-
-def _cache_control_is_safe(cache_control: str) -> bool:
-    """True when a Cache-Control value prevents shared/disk caching of a body."""
-    cc = (cache_control or "").lower()
-    return "no-store" in cc or "no-cache" in cc or "private" in cc
 
 
 def _build_probe_targets(profile) -> list[dict]:
@@ -215,7 +269,8 @@ def test_no_secret_or_pii_in_app_generated_urls(profile, evidence):
             "scan for secret-in-URL leakage (V14.2.1)."
         )
 
-    findings: list[str] = []
+    high_findings: list[str] = []
+    low_findings: list[str] = []
 
     with httpx.Client(timeout=15.0, follow_redirects=False) as client:
         for ep in targets:
@@ -247,9 +302,12 @@ def test_no_secret_or_pii_in_app_generated_urls(profile, evidence):
                 candidate_urls.append(refresh.split("=", 1)[1])
 
             for candidate in candidate_urls:
-                reasons = _scan_url_for_secrets(candidate)
-                if reasons:
-                    findings.append(f"{path}: {', '.join(reasons)}")
+                high_reasons, low_reasons = _scan_url_for_secrets(candidate)
+                if high_reasons:
+                    high_findings.append(f"{path}: {', '.join(high_reasons)}")
+                if low_reasons:
+                    low_findings.append(f"{path}: {', '.join(low_reasons)}")
+                if high_reasons or low_reasons:
                     # Capture the SANITIZED url (query stripped) — never persist
                     # the token-bearing URL to evidence.
                     evidence.capture(
@@ -261,14 +319,26 @@ def test_no_secret_or_pii_in_app_generated_urls(profile, evidence):
                         label=f"{path.lstrip('/')}_secret_in_url",
                     )
 
-    if findings:
+    if high_findings:
         # Self-escalate to HIGH so the aggregator upgrades from the MEDIUM default.
         pytest.fail(
             "HIGH: token/key/PII exposed in app-generated URL(s) — "
-            + "; ".join(findings)
+            + "; ".join(high_findings)
             + ". Sensitive values in URLs leak to browser history, access logs, "
             "and the Referer header sent to third parties (ASVS V14.2.1, "
             "CWE-598 / CWE-200). Carry tokens and PII in headers or POST bodies."
+        )
+
+    if low_findings:
+        # Non-escalating: PII/ambiguous params are MEDIUM (the module default),
+        # not a self-escalated HIGH — a benign ``?code=`` OAuth redirect or an
+        # email in a URL must not flip run.sh to exit 1.
+        pytest.fail(
+            "token/PII pattern in app-generated URL(s) — "
+            + "; ".join(low_findings)
+            + ". Review whether the value is sensitive; PII and full URLs leak via "
+            "browser history and the Referer header (ASVS V14.2.1, CWE-598 / "
+            "CWE-200)."
         )
 
 
@@ -308,10 +378,22 @@ def test_sensitive_responses_are_not_cacheable(profile, user_a_client, evidence)
         body = probe_body_for(ep)
         url = netlify_url(profile, path)
 
-        resp = user_a_client.request(method, url, json=body, timeout=15)
+        try:
+            resp = user_a_client.request(method, url, json=body, timeout=15)
+        except httpx.HTTPError as exc:
+            # Transport/DNS error on this endpoint is not a finding — skip it.
+            evidence.capture(
+                FakeResponse(
+                    0, _sanitize_url(url),
+                    f"[body omitted] request error: {type(exc).__name__}",
+                    method,
+                ),
+                label=f"{path.lstrip('/')}_cache_probe_request_error",
+            )
+            continue
         cache_control = resp.headers.get("cache-control", "")
 
-        if not _cache_control_is_safe(cache_control):
+        if not cache_control_is_safe(cache_control):
             failures.append(f"{path}: Cache-Control: {cache_control or '(absent)'}")
             # Headers only — the body may carry per-user PII we must not persist.
             evidence.capture(
@@ -357,17 +439,24 @@ def test_referrer_policy_limits_url_leakage(profile, evidence):
     """
     base_url = (profile.target and profile.target.base_url) or ""
     surface = _host_surface(profile)
+    page_url = base_url.rstrip("/") + "/"
 
-    with httpx.Client(timeout=15.0, follow_redirects=True) as client:
-        resp = client.get(base_url.rstrip("/") + "/")
+    try:
+        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+            resp = client.get(page_url)
+    except httpx.HTTPError as exc:
+        pytest.skip(f"Main page unreachable ({type(exc).__name__}) — cannot check Referrer-Policy")
 
     policy = resp.headers.get("referrer-policy", "").strip().lower()
+    # ``no-referrer-when-downgrade`` is intentionally EXCLUDED: it still sends the
+    # full URL+query in the Referer header to every HTTPS third-party origin, so
+    # it does not satisfy V14.3.3's leak-prevention requirement.
     safe_policies = {
         "no-referrer",
         "same-origin",
         "strict-origin",
         "strict-origin-when-cross-origin",
-        "no-referrer-when-downgrade",
+        "origin",
     }
     # A header may list multiple tokens; the browser uses the last it understands.
     tokens = {t.strip() for t in policy.split(",") if t.strip()}
@@ -376,7 +465,7 @@ def test_referrer_policy_limits_url_leakage(profile, evidence):
     if not safe:
         evidence.capture(
             FakeResponse(
-                resp.status_code, _sanitize_url(base_url.rstrip("/") + "/"),
+                resp.status_code, _sanitize_url(page_url),
                 f"[body omitted] host={surface} "
                 f"Referrer-Policy: {policy or '(absent)'}",
                 "GET",

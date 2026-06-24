@@ -91,6 +91,10 @@ _TEST_NAME_SEVERITY_OVERRIDES: dict[str, str] = {
     # When the test detects a true bypass (status 200), the pytest.fail message
     # contains "CRITICAL" which the aggregator parses and overrides this entry.
     "test_json_parsing_before_verification": "MEDIUM",
+    # Cache-Control no-store probe lives in test_cors_headers.py (file-stem LOW)
+    # but is a V14.3.2/CWE-524 data-protection control rated MEDIUM in
+    # test_data_protection.py. Override so the same control reports consistently.
+    "test_authenticated_response_is_not_cacheable": "MEDIUM",
 }
 
 # Per-test category overrides (test function name → category).

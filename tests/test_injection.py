@@ -9,7 +9,8 @@ Test categories:
 - CRLF header injection
 - Supabase RPC parameter injection (all client-callable RPCs)
 - OS-command injection (ASVS V1.2.5, CWE-78) — time-based oracle / metacharacter
-- XXE (ASVS V1.5.1, CWE-611) — external-entity + OOB parameter-entity payloads
+- XXE (ASVS V1.5.1, CWE-611) — in-band external-entity payload (OOB parameter-
+  entity payload ships as a manual/documented fixture, not auto-asserted)
 - SSRF (ASVS V1.3.6 / V15.3.2, CWE-918) — internal/metadata target dereference;
   the live SSRF probe is hard-gated behind SSRF_PROBE_ACK=1 until SECURITY.md
   gains SSRF / internal-network probing authorization language.
@@ -23,7 +24,6 @@ import sys as _sys
 import time
 import uuid
 from pathlib import Path
-from pathlib import Path as _Path
 
 import httpx
 import pytest
@@ -38,7 +38,7 @@ _FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 # Ensure the StackBadger package root is importable at collection time.
 # ---------------------------------------------------------------------------
 
-_PKG_ROOT = _Path(__file__).resolve().parent.parent
+_PKG_ROOT = Path(__file__).resolve().parent.parent
 if str(_PKG_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_PKG_ROOT))
 
@@ -431,12 +431,19 @@ def _is_free_text_field(field: str) -> bool:
 
 # Nominal delay the time-based payloads request, in seconds.
 _OSCMD_DELAY = 5
-# Latency threshold (s) above which we treat the delay as command execution.
-# Set comfortably under the requested delay to absorb baseline jitter while
-# still distinguishing a real ~5s sleep.
+# Per-injected-sample latency delta (s) over the ADJACENT benign sample above
+# which we treat the delay as command execution. Compared against a benign
+# request taken immediately before each payload (not a once-up-front baseline),
+# so a serverless cold start that lands on either request cancels out instead of
+# producing a false HIGH.
 _OSCMD_DELAY_THRESHOLD = 4.0
+# Cumulative wall-clock budget (s) for one parametrized case. Once exceeded we
+# stop sending further payloads so a slow/cold target cannot make the case run
+# for minutes.
+_OSCMD_TIME_BUDGET = 60.0
 
 _OSCMD_PAYLOADS: list[str] = [
+    # POSIX shell sinks.
     f"; sleep {_OSCMD_DELAY}",
     f"| sleep {_OSCMD_DELAY}",
     f"& sleep {_OSCMD_DELAY}",
@@ -444,6 +451,11 @@ _OSCMD_PAYLOADS: list[str] = [
     f"$(sleep {_OSCMD_DELAY})",
     f"`sleep {_OSCMD_DELAY}`",
     f"; ping -c {_OSCMD_DELAY} 127.0.0.1",
+    # Windows cmd.exe sinks (POSIX `-c` is malformed on Windows ping; `-n` /
+    # `timeout` are the native delay forms so both sinks are covered).
+    f"& ping -n {_OSCMD_DELAY} 127.0.0.1",
+    f"& timeout /t {_OSCMD_DELAY}",
+    # Reflection oracle (shell echo proves substitution, both platforms).
     "; echo stackbadger-oscmd-marker",
 ]
 
@@ -452,6 +464,18 @@ _OSCMD_ENDPOINTS = [
     ep for ep in _ALL_ENDPOINTS_WITH_PROBE
     if any(_is_free_text_field(f) for f in (ep.get("probe_body") or {}).keys())
 ]
+
+
+def _is_timing_payload(payload: str) -> bool:
+    """True for payloads that intend to add a measurable delay (the timing oracle)."""
+    return any(tok in payload for tok in ("sleep", "ping", "timeout"))
+
+
+def _timed_send(method, url, body):
+    """Send one request and return (response, elapsed_seconds)."""
+    t0 = time.perf_counter()
+    resp = send_request(method, url, json_body=body, timeout=20.0)
+    return resp, time.perf_counter() - t0
 
 
 @pytest.mark.asvs_extended
@@ -467,9 +491,15 @@ def test_oscmd_injection_time_oracle(endpoint, profile, evidence):
 
     Injects shell-metacharacter payloads (`; sleep 5`, `$(sleep 5)`, ...) into
     each free-text field. A safe handler treats the value as opaque data: no
-    measurable delay, no command-echo reflection, and never a 500. A response
-    that takes ~the requested sleep longer than a plain-text baseline indicates
-    the payload reached a shell (ASVS V1.2.5, CWE-78).
+    measurable delay, no command-echo reflection, and never a 500.
+
+    Cold-start defence: each timing payload is compared against a benign request
+    taken IMMEDIATELY before it (a paired adjacent sample), so a serverless cold
+    start that inflates one request does not register as a delta. A single hit is
+    treated as suspicion only; we require a confirmation re-test (a second
+    adjacent benign/injected pair that also clears the threshold) before failing,
+    and we stop once the cumulative time budget is spent so a slow target cannot
+    drag the case out for minutes (ASVS V1.2.5, CWE-78).
     """
     from conftest import probe_body_for
     path = endpoint.get("path", "")
@@ -481,25 +511,25 @@ def test_oscmd_injection_time_oracle(endpoint, profile, evidence):
     if not free_fields:
         pytest.skip(f"{path}: no free-text field to target for OS-command injection")
 
-    # Baseline latency with a benign value (the slowest of two samples, to bias
-    # the comparison conservatively against false positives from cold starts).
-    baseline = 0.0
-    benign_field = free_fields[0]
-    for _ in range(2):
+    def _benign_then_injected(field, payload):
+        """Adjacent benign-then-injected pair; return (resp, injected-vs-benign delta)."""
         benign_body = dict(base_body)
-        benign_body[benign_field] = "stackbadger-baseline"
-        t0 = time.perf_counter()
-        b_resp = send_request(method, url, json_body=benign_body, timeout=20.0)
-        baseline = max(baseline, time.perf_counter() - t0)
+        benign_body[field] = "stackbadger-baseline"
+        _, benign_elapsed = _timed_send(method, url, benign_body)
+        injected = dict(base_body)
+        injected[field] = payload
+        resp, inj_elapsed = _timed_send(method, url, injected)
+        return resp, inj_elapsed, benign_elapsed, inj_elapsed - benign_elapsed
 
+    case_start = time.perf_counter()
     for field in free_fields:
         for payload in _OSCMD_PAYLOADS:
-            injected = dict(base_body)
-            injected[field] = payload
+            if time.perf_counter() - case_start > _OSCMD_TIME_BUDGET:
+                # Slow/cold target: stop sending further payloads. No finding is
+                # asserted from an exhausted budget (avoids minutes-long cases).
+                return
             context = f"{method} {path} {field}={payload!r}"
-            t0 = time.perf_counter()
-            resp = send_request(method, url, json_body=injected, timeout=20.0)
-            elapsed = time.perf_counter() - t0
+            resp, inj_elapsed, benign_elapsed, delta = _benign_then_injected(field, payload)
 
             _assert_safe_status(resp, context)
             # The command marker must not be echoed (would prove substitution).
@@ -508,22 +538,31 @@ def test_oscmd_injection_time_oracle(endpoint, profile, evidence):
                 "evaluated the injected `echo` (ASVS V1.2.5, CWE-78)."
             )
 
-            if "sleep" in payload or "ping" in payload:
-                delayed = (
-                    elapsed >= _OSCMD_DELAY_THRESHOLD
-                    and elapsed - baseline >= _OSCMD_DELAY_THRESHOLD
+            if _is_timing_payload(payload):
+                suspicious = (
+                    inj_elapsed >= _OSCMD_DELAY_THRESHOLD
+                    and delta >= _OSCMD_DELAY_THRESHOLD
                 )
-                if delayed:
-                    evidence.capture(
-                        resp,
-                        f"oscmd_timeoracle_{path.lstrip('/')}_{field}_"
-                        f"{elapsed:.1f}s_baseline_{baseline:.1f}s",
+                if suspicious:
+                    # Confirmation re-test: re-run the adjacent pair. A genuine
+                    # injected sleep reproduces; a one-off cold start does not.
+                    resp2, inj2, benign2, delta2 = _benign_then_injected(field, payload)
+                    _assert_safe_status(resp2, context)
+                    confirmed = inj2 >= _OSCMD_DELAY_THRESHOLD and delta2 >= _OSCMD_DELAY_THRESHOLD
+                    if confirmed:
+                        evidence.capture(
+                            resp2,
+                            f"oscmd_timeoracle_{path.lstrip('/')}_{field}_"
+                            f"{inj_elapsed:.1f}s+{inj2:.1f}s_delta_"
+                            f"{delta:.1f}s+{delta2:.1f}s",
+                        )
+                    assert not confirmed, (
+                        f"{context}: injected request ran {inj_elapsed:.1f}s "
+                        f"(+{delta:.1f}s over its adjacent benign sample) and "
+                        f"reproduced on re-test at {inj2:.1f}s (+{delta2:.1f}s) — "
+                        f"the `{payload}` payload appears to have executed a shell "
+                        "delay (ASVS V1.2.5, CWE-78)."
                     )
-                assert not delayed, (
-                    f"{context}: response took {elapsed:.1f}s vs baseline "
-                    f"{baseline:.1f}s — the `{payload}` payload appears to have "
-                    "executed a shell sleep (ASVS V1.2.5, CWE-78)."
-                )
             if resp.status_code not in (200, 400, 401, 403, 422):
                 evidence.capture(
                     resp, f"oscmd_{path.lstrip('/')}_{field}_status_{resp.status_code}"
@@ -534,15 +573,26 @@ def test_oscmd_injection_time_oracle(endpoint, profile, evidence):
 # XXE — external-entity resolution (ASVS V1.5.1, CWE-611)
 # ---------------------------------------------------------------------------
 # Markers that, if reflected, prove a file-disclosure entity resolved.
+# All markers below are LITERAL substrings (no regex) — each is tested with a
+# plain ``marker not in body`` membership check, so a pattern like ``root:.*:0:0:``
+# would never match real /etc/passwd output and is deliberately excluded.
 _XXE_LEAK_MARKERS = (
-    "root:x:0:0:",          # /etc/passwd first line
-    "root:.*:0:0:",         # generic /etc/passwd shape
-    "[fonts]",              # win.ini section
-    "for 16-bit app support",  # win.ini comment
+    "root:x:0:0:",          # /etc/passwd first line (standard shadowed password)
+    "root:!:0:0:",          # /etc/passwd with locked password field
+    "root::0:0:",           # /etc/passwd with empty password field
+    "[fonts]",              # win.ini section (literal substring)
+    "for 16-bit app support",  # win.ini comment (literal substring)
 )
 
-# XML payload fixtures (classic external entity + OOB parameter entity).
-_XXE_FIXTURES = ("xxe_classic.xml", "xxe_oob.xml")
+# XML payload fixtures exercised by the IN-BAND assertion below. Only
+# ``xxe_classic.xml`` is in-band observable: a vulnerable parser reflects the
+# disclosed file content directly in the response, which ``marker not in body``
+# can catch. ``xxe_oob.xml`` is intentionally NOT listed here — it is an
+# out-of-band parameter-entity exfil payload whose only signal is an outbound
+# fetch to a collaborator/canary, which an in-band response check can never
+# observe (it would pass even against a vulnerable parser). It ships as a
+# manual/documented payload; see fixtures/xxe_oob.xml.
+_XXE_FIXTURES = ("xxe_classic.xml",)
 
 
 def _xml_capable_endpoints(profile) -> list[dict]:
@@ -576,11 +626,15 @@ def _xml_capable_endpoints(profile) -> list[dict]:
 def test_xxe_external_entity(fixture_name, profile, evidence):
     """XML endpoints must not resolve external entities (XXE).
 
-    Posts a classic file-disclosure entity and an out-of-band parameter-entity
-    payload to each profile-declared XML endpoint. A hardened parser disables
-    DOCTYPE/external-entity processing: the entity must NOT resolve, so no local
-    file content is reflected and no outbound fetch is triggered (ASVS V1.5.1,
+    Posts a classic in-band file-disclosure entity to each profile-declared XML
+    endpoint. A hardened parser disables DOCTYPE/external-entity processing: the
+    entity must NOT resolve, so no local file content is reflected (ASVS V1.5.1,
     CWE-611). Skips cleanly when the profile declares no XML-capable endpoint.
+
+    Only the in-band fixture is asserted here. The out-of-band parameter-entity
+    payload (fixtures/xxe_oob.xml) is a manual/documented payload: its signal is
+    an outbound fetch to a collaborator/canary, which an in-band response check
+    cannot observe, so asserting on it would always pass and mask a real XXE.
     """
     xml_endpoints = _xml_capable_endpoints(profile)
     if not xml_endpoints:

@@ -29,19 +29,8 @@ if str(_PKG_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_PKG_ROOT))
 
 from profile import load_profile, resolve_profile_path  # noqa: E402
-from helpers import FakeResponse, netlify_url  # noqa: E402
+from helpers import FakeResponse, cache_control_is_safe, netlify_url  # noqa: E402
 from conftest import first_endpoint, probe_body_for  # noqa: E402
-
-
-def _cache_control_is_safe(cache_control: str) -> bool:
-    """True when a Cache-Control value prevents shared/disk caching of a body.
-
-    Acceptable directives (ASVS V14.3.2): ``no-store`` is the strongest;
-    ``no-cache`` (revalidate every time) and ``private`` (no shared-proxy
-    caching) are accepted as adequate for a sensitive authenticated response.
-    """
-    cc = (cache_control or "").lower()
-    return "no-store" in cc or "no-cache" in cc or "private" in cc
 
 
 def _collection_profile():
@@ -437,10 +426,16 @@ class TestAuthenticatedResponseCaching:
         body = probe_body_for(endpoint)
         url = netlify_url(profile, path)
 
-        resp = user_a_client.request(method, url, json=body, timeout=15)
+        try:
+            resp = user_a_client.request(method, url, json=body, timeout=15)
+        except httpx.HTTPError as exc:
+            pytest.skip(
+                f"Authenticated endpoint {path} unreachable "
+                f"({type(exc).__name__}) — cannot check cache hygiene"
+            )
 
         cache_control = resp.headers.get("cache-control", "")
-        safe = _cache_control_is_safe(cache_control)
+        safe = cache_control_is_safe(cache_control)
 
         if not safe:
             # Capture headers only — the body may carry per-user PII we must not

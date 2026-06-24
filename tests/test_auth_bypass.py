@@ -40,7 +40,7 @@ _PKG_ROOT = _Path(__file__).resolve().parent.parent
 if str(_PKG_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_PKG_ROOT))
 
-from helpers import send_request  # noqa: E402
+from helpers import auth_provider as _auth_provider, send_request  # noqa: E402
 
 
 def _collection_profile():
@@ -240,11 +240,6 @@ def _make_id_token_shaped_jwt(provider: str) -> str:
 # JWT-bearer providers this family supports. NextAuth is cookie/session based
 # (no JWT bearer to forge) and is handled with an explicit skip-with-reason.
 _JWT_BEARER_PROVIDERS = ("clerk", "supabase-auth", "firebase")
-
-
-def _auth_provider(profile) -> str:
-    """Lower-cased active auth provider from the profile, or '' when absent."""
-    return ((profile.stack and profile.stack.auth) or "").lower()
 
 
 def _first_authenticated_url(profile) -> tuple[str, dict]:
