@@ -81,3 +81,47 @@ def test_benign_app_response_left_intact(tmp_path):
     body = _written(tmp_path)["response"]["body"]
     assert '"id": 42' in body or '"id":42' in body
     assert "ok" in body
+
+
+def test_url_field_oauth_code_scrubbed_on_disk(tmp_path):
+    # An OAuth callback code in the request URL must not persist verbatim.
+    cap = EvidenceCapture(node_id="tests/test_x.py::test_cb", evidence_dir=tmp_path)
+    req = httpx.Request(
+        "GET", "https://example.com/api/oauth/callback?code=4/0AeLiveAuthCode123&state=s"
+    )
+    resp = httpx.Response(200, request=req, json={"ok": True})
+    cap.capture(resp, "cb")
+
+    url = _written(tmp_path)["request"]["url"]
+    assert "4/0AeLiveAuthCode123" not in url
+    assert "code=[REDACTED]" in url
+    # Path/host preserved for debugging.
+    assert "https://example.com/api/oauth/callback" in url
+
+
+def test_location_header_token_scrubbed_on_disk(tmp_path):
+    # A token in a (non-denylisted) Location redirect header must be scrubbed.
+    cap = EvidenceCapture(node_id="tests/test_x.py::test_redir", evidence_dir=tmp_path)
+    req = httpx.Request("GET", "https://example.com/connect")
+    resp = httpx.Response(
+        302, request=req,
+        headers={"location": "https://example.com/cb#access_token=ya29.aLiveTokenValue123456"},
+    )
+    cap.capture(resp, "redir")
+
+    loc = _written(tmp_path)["response"]["headers"]["location"]
+    assert "ya29.aLiveTokenValue123456" not in loc
+
+
+def test_request_cookie_header_redacted_on_disk(tmp_path):
+    # The request Cookie header (session/PKCE/state) is now denylisted.
+    cap = EvidenceCapture(node_id="tests/test_x.py::test_cookie", evidence_dir=tmp_path)
+    req = httpx.Request(
+        "GET", "https://example.com/api/me",
+        headers={"cookie": "next-auth.session-token=opaqueSessionValue123456789"},
+    )
+    resp = httpx.Response(200, request=req, json={"ok": True})
+    cap.capture(resp, "cookie")
+
+    cookie = _written(tmp_path)["request"]["headers"]["cookie"]
+    assert "opaqueSessionValue123456789" not in cookie

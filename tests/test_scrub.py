@@ -17,6 +17,7 @@ from reports.scrub import (
     _secrets_from_env,
     scrub_evidence_body,
     scrub_file,
+    scrub_locator,
     scrub_text,
 )
 
@@ -280,6 +281,78 @@ def test_evidence_body_still_redacts_bearer_and_jwt():
 def test_evidence_body_empty_passthrough():
     assert scrub_evidence_body("") == ""
     assert scrub_evidence_body("[body omitted]") == "[body omitted]"
+
+
+def test_evidence_body_redacts_google_client_secret():
+    body = '{"grant_type":"refresh_token","client_secret":"GOCSPX-supersecretvalue123"}'
+    out = scrub_evidence_body(body)
+    assert "GOCSPX-supersecretvalue123" not in out
+    # Either the bare-shape pass or the field-value pass redacts it.
+    assert "[REDACTED" in out
+
+
+def test_evidence_body_single_weak_marker_not_wholesale_redacted():
+    # Regression: a benign app body that merely uses one Gmail-ish field name
+    # ("historyId") must NOT be wholesale-redacted — that would destroy unrelated
+    # findings' evidence. Requires 2+ weak markers (or a strong/host marker).
+    body = '{"historyId": 5, "status": "ok", "items": 3}'
+    assert scrub_evidence_body(body) == body
+
+
+def test_evidence_body_two_weak_markers_wholesale_redacted():
+    body = '{"snippet":"Hi Bob","threadId":"18c","subject":"x"}'
+    out = scrub_evidence_body(body)
+    assert "Hi Bob" not in out
+    assert "restricted-scope content" in out
+
+
+def test_evidence_body_strong_marker_alone_redacted():
+    body = '{"name":"q3.pdf","webContentLink":"https://drive/x"}'
+    out = scrub_evidence_body(body)
+    assert "q3.pdf" not in out
+    assert "restricted-scope content" in out
+
+
+def test_evidence_body_graph_host_triggers_redaction():
+    body = '{"value":[{"subject":"Invoice","from":"a@b.com"}]}'
+    out = scrub_evidence_body(body, url="https://graph.microsoft.com/v1.0/me/messages")
+    assert "Invoice" not in out
+    assert "restricted-scope content" in out
+
+
+# ---------------------------------------------------------------------------
+# scrub_locator — URL field + non-credential header values
+# ---------------------------------------------------------------------------
+
+def test_locator_redacts_oauth_code_query_param_keeps_path():
+    url = "https://example.com/api/oauth/callback?code=4/0AeXampleAuthCode123&state=abc"
+    out = scrub_locator(url)
+    assert "4/0AeXampleAuthCode123" not in out
+    assert "code=[REDACTED]" in out
+    # Host/path and non-secret state survive for debugging.
+    assert "https://example.com/api/oauth/callback" in out
+    assert "state=abc" in out
+
+
+def test_locator_redacts_implicit_flow_access_token_fragment():
+    url = "https://example.com/cb#access_token=ya29.aLiveTokenValue1234567890&token_type=Bearer"
+    out = scrub_locator(url)
+    assert "ya29.aLiveTokenValue1234567890" not in out
+    assert "access_token=[REDACTED]" in out or "[REDACTED_OAUTH_TOKEN]" in out
+
+
+def test_locator_redacts_bearer_in_header_value():
+    out = scrub_locator("Bearer eyJabcdefghijklmnopqrstuvwxyz0123")
+    assert "Bearer [REDACTED]" in out or "[REDACTED_JWT]" in out
+
+
+def test_locator_preserves_benign_url():
+    url = "https://example.com/api/items?page=2&sort=name"
+    assert scrub_locator(url) == url
+
+
+def test_locator_empty_passthrough():
+    assert scrub_locator("") == ""
 
 
 # ---------------------------------------------------------------------------

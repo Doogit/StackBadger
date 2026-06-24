@@ -17,7 +17,7 @@ from typing import Any
 
 from discover import discover_live
 from exclusions import effective_exclude_paths, effective_exclude_tables
-from profile import Profile, load_profile
+from profile import Profile, load_profile, _validate_oauth_block
 from providers import ProviderManifest
 
 # Default stack used for the canonical black-box target (Clerk + Supabase + Stripe) and
@@ -231,6 +231,11 @@ def assemble_profile(
         data["auth"] = {"verify_path": None}
     else:
         auth_block.setdefault("verify_path", None)
+
+    # Re-validate the oauth/delegated_send block on the assembled dict: load_profile
+    # validated the YAML layer, but the env-override merge above can introduce
+    # oauth fields, so re-check the merged shape before any probe reads it.
+    _validate_oauth_block(data)
 
     # Validate minimum required fields.
     target = data.get("target")

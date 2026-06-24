@@ -170,8 +170,13 @@ def _validate_oauth_block(data: dict[str, Any]) -> None:
             redirect_uris: [<callback url>, ...]
             token_endpoint: <app BFF token-exchange route>
             required_scopes: [<scope the app legitimately needs>, ...]
-            send_endpoints:   [{path: <str>, method: <str>}, ...]
+            send_endpoints:   [{path: <str>, method: <str>, probe_body: <map>}, ...]
             status_endpoints: [{path: <str>, method: <str>}, ...]
+
+    ``send_endpoints[].probe_body`` is the operator-supplied request body (e.g. a
+    safe test recipient) the §P1-D delegated-send write-probe sends; without it
+    the probe skips rather than sending a blind/malformed request. ``method``
+    defaults to POST (send) / GET (status) when omitted.
 
     Raises ``ValueError`` if a present field has the wrong type, so a malformed
     profile fails loudly at load time rather than a probe silently misreading it.
@@ -224,6 +229,12 @@ def _validate_oauth_block(data: dict[str, Any]) -> None:
                 raise ValueError(
                     f"Each entry in 'oauth.delegated_send.{ep_field}' must be a "
                     "mapping with a string 'path' field"
+                )
+            method = item.get("method")
+            if method is not None and not isinstance(method, str):
+                raise ValueError(
+                    f"Entry method in 'oauth.delegated_send.{ep_field}' must be a "
+                    f"string when present, got {type(method).__name__}"
                 )
 
 

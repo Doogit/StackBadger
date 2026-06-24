@@ -160,6 +160,43 @@ def test_load_profile_rejects_non_list_status_endpoints(tmp_path):
         )
 
 
+def test_load_profile_rejects_non_list_send_endpoints(tmp_path):
+    with pytest.raises(ValueError, match="send_endpoints' must be a list"):
+        load_profile(
+            _write_profile(
+                tmp_path,
+                "oauth:\n  delegated_send:\n    send_endpoints: /api/send\n",
+            )
+        )
+
+
+def test_load_profile_rejects_non_string_method(tmp_path):
+    with pytest.raises(ValueError, match="method in 'oauth.delegated_send.send_endpoints'"):
+        load_profile(
+            _write_profile(
+                tmp_path,
+                "oauth:\n  delegated_send:\n    send_endpoints:\n"
+                "      - path: /api/send\n        method: [POST]\n",
+            )
+        )
+
+
+def test_load_profile_accepts_send_endpoint_probe_body(tmp_path):
+    # probe_body is an operator-supplied mapping the §P1-D write-probe sends; it
+    # must load without error.
+    profile = load_profile(
+        _write_profile(
+            tmp_path,
+            "oauth:\n  delegated_send:\n    send_endpoints:\n"
+            "      - path: /api/send\n        method: POST\n"
+            "        probe_body:\n          to: sink@example.com\n",
+        )
+    )
+    ep = profile.oauth.delegated_send.send_endpoints[0]
+    assert ep.path == "/api/send"
+    assert ep.probe_body.to == "sink@example.com"
+
+
 # ---------------------------------------------------------------------------
 # profile_assembler carry-through + env overrides
 # ---------------------------------------------------------------------------

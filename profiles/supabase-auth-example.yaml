@@ -79,10 +79,16 @@ oauth:
     required_scopes:
       - "https://www.googleapis.com/auth/gmail.send"
     # App endpoints that trigger a delegated send (token-leakage probe inspects
-    # their responses for access/refresh tokens — none should appear).
+    # their responses for access/refresh tokens — none should appear). The
+    # write-probe only fires when probe_body is set (a safe operator-controlled
+    # test recipient); without it the probe skips rather than sending blind mail.
     send_endpoints:
       - path: /api/email/send
         method: POST
+        # probe_body:
+        #   to: "pentest-sink@example.com"
+        #   subject: "stackbadger oauth token-leak probe"
+        #   body: "probe"
     # Endpoints that report OAuth connection / token status (a common spot for a
     # poorly built BFF to echo a stored token back to the browser).
     status_endpoints:

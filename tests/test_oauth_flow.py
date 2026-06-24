@@ -53,31 +53,42 @@ if str(_PKG_ROOT) not in _sys.path:
 
 from conftest import endpoints_for_category, probe_body_for  # noqa: E402,F401
 from helpers import FakeResponse, auth_provider as _auth_provider, safe_text as _safe_text  # noqa: E402
+# Reuse the canonical token-shape regexes from the scrubber so the probe's
+# leak-detection and the evidence redactor cannot drift apart.
+from reports.scrub import (  # noqa: E402
+    _GOOGLE_ACCESS_TOKEN_RE as _ACCESS_TOKEN_RE,
+    _GOOGLE_REFRESH_TOKEN_RE as _REFRESH_TOKEN_RE,
+)
 
 # OIDC / framework scopes that are benign regardless of the declared API scopes:
 # they grant identity/login or offline refresh, not restricted data access, so a
 # request for them is not a scope-minimisation finding.
 _BENIGN_SCOPES = frozenset(
     {
+        # OIDC / framework
         "openid",
         "email",
         "profile",
         "offline_access",
+        # Google identity
         "https://www.googleapis.com/auth/userinfo.email",
         "https://www.googleapis.com/auth/userinfo.profile",
+        # Microsoft identity (Graph sign-in / profile)
+        "User.Read",
+        "https://graph.microsoft.com/User.Read",
     }
 )
 
-# Token-material markers used by the V10.1.1 leakage probes. ya29. = Google
-# access token, 1// = Google refresh token; the JSON field names cover Google +
-# Microsoft Graph token responses.
-_TOKEN_BODY_MARKERS = (
-    "ya29.",
-    "access_token",
-    "refresh_token",
-    "id_token",
+# A JSON token field carrying a NON-TRIVIAL value (>=16 chars). The V10.1.1
+# leakage probes flag a token VALUE, never a bare field-NAME substring — a status
+# endpoint reporting {"access_token_expired": false} or {"refresh_token_present":
+# true} merely NAMES a token and must not trip a finding. Real Google/Microsoft
+# token responses serialise access/refresh/id tokens as long quoted strings, so a
+# 16+ char quoted value is the discriminator. Bare Google token shapes (ya29. /
+# 1//) are caught by the imported scrub regexes regardless of quoting.
+_TOKEN_VALUE_FIELD_RE = re.compile(
+    r'"(?:access_token|refresh_token|id_token)"\s*:\s*"[^"]{16,}"'
 )
-_GOOGLE_TOKEN_SHAPE_RE = re.compile(r"ya29\.[A-Za-z0-9_.\-]{10,}|1//[0-9A-Za-z_\-]{10,}")
 
 
 # ---------------------------------------------------------------------------
@@ -183,9 +194,14 @@ def _authorize_params(profile, client, evidence, label: str) -> dict[str, list[s
 
 
 def _requested_scopes(params: dict[str, list[str]]) -> list[str]:
-    """Flatten the ``scope`` param (space- or plus-delimited) into a scope list."""
+    """Flatten the ``scope`` param into a scope list.
+
+    Tolerates space-, plus-, and comma-delimited scope strings (different
+    providers/encoders use different separators) so a comma-delimited request is
+    not parsed as one giant scope and falsely flagged as over-broad.
+    """
     raw = " ".join(params.get("scope", []))
-    return [s for s in raw.replace("+", " ").split() if s]
+    return [s for s in raw.replace("+", " ").replace(",", " ").split() if s]
 
 
 # ---------------------------------------------------------------------------
@@ -330,11 +346,13 @@ def test_oauth_as_owned_controls_are_attested(profile):
 # ---------------------------------------------------------------------------
 
 def _assert_no_token_in_body(body: str, where: str) -> None:
-    """Fail when a response body carries OAuth token material."""
-    lowered = body.lower()
-    marker_hit = any(m in lowered for m in _TOKEN_BODY_MARKERS)
-    shape_hit = bool(_GOOGLE_TOKEN_SHAPE_RE.search(body))
-    assert not (marker_hit or shape_hit), (
+    """Fail when a response body carries OAuth token material (a token VALUE)."""
+    leak = (
+        _ACCESS_TOKEN_RE.search(body)
+        or _REFRESH_TOKEN_RE.search(body)
+        or _TOKEN_VALUE_FIELD_RE.search(body)
+    )
+    assert not leak, (
         f"{where} returned OAuth token material to the browser. Delegated-send "
         "access/refresh tokens must be held server-side (e.g. a secrets vault) "
         "and never serialised to a client response (ASVS V10.1.1, CWE-522)."
@@ -508,21 +526,41 @@ def test_requested_scopes_parsing():
     assert "https://www.googleapis.com/auth/gmail.send" in scopes
     # Plus-delimited fallback.
     assert _requested_scopes({"scope": ["a+b+c"]}) == ["a", "b", "c"]
+    # Comma-delimited (some providers/encoders) must split, not parse as one scope.
+    assert _requested_scopes({"scope": ["a,b,c"]}) == ["a", "b", "c"]
+    assert _requested_scopes({"scope": ["a, b , c"]}) == ["a", "b", "c"]
     assert _requested_scopes({}) == []
 
 
 def test_assert_no_token_in_body_flags_token_material():
     for leak in (
-        '{"access_token":"x"}',
-        '{"refresh_token":"x"}',
+        # Realistic-length token values (the discriminator is a real value).
+        '{"access_token":"ya29.a0AfH6SMByExampleTokenValue1234567890"}',
+        '{"refresh_token":"1//0eXampleRefreshTokenValue_abc-DEF"}',
+        '{"id_token":"eyJhbGciOiJSUzI1NiIsImtpZCI6IjEyMyJ9.payload.sig"}',
+        # Bare Google token shape with no JSON wrapper (shape-only path).
+        "token is 1//0eXampleRefreshTokenValue_abc-DEF here",
         "token=ya29.a0AfH6SMByExampleToken12345",
-        '{"id_token":"x"}',
     ):
         with pytest.raises(AssertionError):
             _assert_no_token_in_body(leak, "test")
 
 
 def test_assert_no_token_in_body_passes_benign():
-    # No token markers / shapes → no assertion.
+    # No token shapes / real token values → no assertion.
     _assert_no_token_in_body('{"connected":true,"email_count":3}', "test")
     _assert_no_token_in_body("", "test")
+
+
+def test_assert_no_token_in_body_ignores_field_name_substring():
+    # Regression: a status endpoint that merely NAMES a token (no value) must not
+    # trip a finding — this is the common, benign shape and a false HIGH here
+    # would break the run.sh exit-1 gate.
+    for benign in (
+        '{"access_token_expired": false}',
+        '{"refresh_token_present": true}',
+        '{"has_access_token": false, "connected": true}',
+        '{"access_token": null}',
+        '{"access_token": "x"}',  # value too short to be a real token
+    ):
+        _assert_no_token_in_body(benign, "test")
