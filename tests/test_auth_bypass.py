@@ -40,7 +40,7 @@ _PKG_ROOT = _Path(__file__).resolve().parent.parent
 if str(_PKG_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_PKG_ROOT))
 
-from helpers import send_request  # noqa: E402
+from helpers import auth_provider as _auth_provider, send_request  # noqa: E402
 
 
 def _collection_profile():
@@ -161,6 +161,110 @@ def _make_wrong_issuer_jwt() -> str:
         "azp": "pentest-adversary",
     }
     return pyjwt.encode(payload, "adversary-secret", algorithm="HS256")
+
+
+# ---------------------------------------------------------------------------
+# §P1-E — JWT audience / token-type hardening forgers
+#
+# These mirror the existing _make_*_jwt helpers: hand-built, structurally valid
+# tokens signed with a throwaway HS256 secret. A correctly-hardened verifier
+# rejects them on signature/issuer alone, but these probes specifically target
+# the *claim-level* checks (aud, typ) so the forged claims are provider-shaped:
+# the point is that even a token that otherwise looked plausible must be
+# refused because its audience/type is wrong.
+# ---------------------------------------------------------------------------
+
+# Wrong-audience value the target must never accept.
+_ATTACKER_AUDIENCE = "https://attacker.example"
+
+# Per-provider iss values so the forged token at least carries a provider-shaped
+# issuer; the aud/typ claim is the deliberately-wrong axis under test.
+_PROVIDER_ISS = {
+    "clerk": "https://clerk.example.com",
+    "supabase-auth": "https://project.supabase.co/auth/v1",
+    "firebase": "https://securetoken.google.com/example-project",
+}
+
+
+def _make_wrong_aud_jwt(provider: str) -> str:
+    """Craft a structurally valid token whose ``aud`` is an attacker value.
+
+    The token is provider-shaped (issuer + standard claims) but its audience is
+    ``https://attacker.example`` — a value the target should never accept. If
+    the endpoint returns 2xx the app ignores ``aud`` (ASVS V9.2.3 / CWE-345).
+    """
+    now = int(time.time())
+    payload = {
+        "sub": "user_pentest_wrong_aud",
+        "iss": _PROVIDER_ISS.get(provider, "https://clerk.example.com"),
+        "aud": _ATTACKER_AUDIENCE,
+        "iat": now,
+        "exp": now + 3600,
+        "azp": "pentest",
+    }
+    return pyjwt.encode(payload, "wrong-aud-secret-not-valid", algorithm="HS256")
+
+
+def _make_id_token_shaped_jwt(provider: str) -> str:
+    """Craft an ID-token-shaped token presented where an access token is expected.
+
+    Models an OIDC ``id_token``: ``typ: ID`` header, ``aud`` set to a client_id
+    (the audience of an ID token, not a resource server), an OIDC identity
+    profile (email / name), and deliberately NO scope/role/authorization claim.
+    An access-token-expecting endpoint must reject it (ASVS V9.2.2 / CWE-347):
+    an ID token authenticates the user to the *client*, it is not an
+    authorization credential for an API.
+    """
+    now = int(time.time())
+    header = {"alg": "HS256", "typ": "ID"}
+    payload = {
+        "sub": "user_pentest_idtoken",
+        "iss": _PROVIDER_ISS.get(provider, "https://clerk.example.com"),
+        # ID-token audience is the OIDC client_id, not the API/resource server.
+        "aud": "pentest-oidc-client-id",
+        "iat": now,
+        "exp": now + 3600,
+        "auth_time": now,
+        "nonce": "pentest-nonce",
+        "email": "pentest@attacker.example",
+        "email_verified": True,
+        "name": "Pentest Probe",
+        # Intentionally NO scope / role / permission claim: this is an identity
+        # token, not an access token.
+    }
+    return pyjwt.encode(
+        payload, "id-token-secret-not-valid", algorithm="HS256", headers=header
+    )
+
+
+# JWT-bearer providers this family supports. NextAuth is cookie/session based
+# (no JWT bearer to forge) and is handled with an explicit skip-with-reason.
+_JWT_BEARER_PROVIDERS = ("clerk", "supabase-auth", "firebase")
+
+
+def _first_authenticated_url(profile) -> tuple[str, dict]:
+    """Resolve the first authenticated endpoint URL from the profile, or skip.
+
+    Derived from the profile (no hardcoded endpoint name); skips cleanly when
+    the profile declares no authenticated endpoint.
+    """
+    from conftest import first_endpoint
+
+    endpoint = first_endpoint(profile, "authenticated")
+    return _endpoint_url(profile, endpoint), endpoint
+
+
+def _skip_non_jwt_provider(provider: str) -> None:
+    """Skip-with-reason for providers this JWT family cannot exercise."""
+    if provider == "nextauth":
+        pytest.skip(
+            "NextAuth is cookie/session based (no JWT bearer to forge); "
+            "audience/type token hardening is not applicable to it."
+        )
+    if provider not in _JWT_BEARER_PROVIDERS:
+        pytest.skip(
+            f"JWT audience/type probe does not support stack.auth='{provider or '(empty)'}'"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -412,4 +516,85 @@ def test_anonymous_endpoint_rejects_expired_jwt(endpoint, profile, evidence):
     )
     assert resp.status_code != 500, (
         f"{endpoint['path']} returned 500 (unhandled error) for expired JWT"
+    )
+
+
+# ---------------------------------------------------------------------------
+# §P1-E — JWT audience / token-type hardening (ASVS V9.2.2 / V9.2.3)
+#
+# Cross-provider by design: each probe dispatches on profile.stack.auth and
+# forges a provider-shaped token, deriving the target from the FIRST
+# authenticated endpoint in the profile (no hardcoded endpoint names). NextAuth
+# is cookie/session based — no JWT bearer to forge — so it skips with a reason.
+#
+# These send a forged bearer token to an existing endpoint and expect REJECTION
+# (read-only, no mutation), matching this module's JWT-probe convention — so NO
+# write_probe marker. They carry asvs_extended (heavy pre-audit scope) plus the
+# dual asvs()/cwe() coverage tags. Findings inherit auth_bypass / HIGH from this
+# module's aggregate mapping.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asvs_extended
+@pytest.mark.asvs("9.2.3")
+@pytest.mark.cwe("345")
+def test_wrong_audience_jwt_rejected(profile, evidence):
+    """An authenticated endpoint must reject a token whose ``aud`` is wrong.
+
+    Presents a structurally valid, provider-shaped token whose ``aud`` claim is
+    an attacker-controlled value (``https://attacker.example``) the target
+    should never accept. A 2xx means the app does not validate ``aud`` and would
+    accept tokens minted for a different audience (ASVS V9.2.3, CWE-345).
+    """
+    provider = _auth_provider(profile)
+    _skip_non_jwt_provider(provider)
+
+    url, endpoint = _first_authenticated_url(profile)
+    token = _make_wrong_aud_jwt(provider)
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = send_request(endpoint.get("method", "POST"), url, headers=headers)
+
+    if resp.status_code < 400:
+        evidence.capture(resp, "wrong_aud_jwt_accepted")
+    assert resp.status_code in (401, 403), (
+        f"{endpoint['path']} returned {resp.status_code} for a token with "
+        f"aud='{_ATTACKER_AUDIENCE}' (provider '{provider}'); expected 401/403. "
+        "A 2xx means the app ignores the audience claim and would accept a token "
+        "minted for a different audience (ASVS V9.2.3, CWE-345)."
+    )
+    assert resp.status_code != 500, (
+        f"{endpoint['path']} returned 500 (unhandled error) for wrong-aud JWT"
+    )
+
+
+@pytest.mark.asvs_extended
+@pytest.mark.asvs("9.2.2")
+@pytest.mark.cwe("347")
+def test_id_token_rejected_where_access_token_expected(profile, evidence):
+    """An access-token endpoint must reject an ID-token-shaped token.
+
+    Presents an OIDC ``id_token``-shaped token (``typ: ID`` header, ``aud`` set
+    to a client_id, identity profile claims, no scope/role) where an access
+    token is expected. An ID token authenticates the user to the client; it is
+    not an authorization credential for an API. Acceptance (2xx) is a token-type
+    confusion finding (ASVS V9.2.2, CWE-347).
+    """
+    provider = _auth_provider(profile)
+    _skip_non_jwt_provider(provider)
+
+    url, endpoint = _first_authenticated_url(profile)
+    token = _make_id_token_shaped_jwt(provider)
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = send_request(endpoint.get("method", "POST"), url, headers=headers)
+
+    if resp.status_code < 400:
+        evidence.capture(resp, "id_token_accepted_as_access_token")
+    assert resp.status_code in (401, 403), (
+        f"{endpoint['path']} returned {resp.status_code} for an ID-token-shaped "
+        f"token (typ=ID, provider '{provider}') where an access token is "
+        "expected; expected 401/403. Accepting an ID token as an authorization "
+        "credential is token-type confusion (ASVS V9.2.2, CWE-347)."
+    )
+    assert resp.status_code != 500, (
+        f"{endpoint['path']} returned 500 (unhandled error) for ID-token-shaped JWT"
     )
