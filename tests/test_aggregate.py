@@ -241,6 +241,7 @@ def test_provider_content_dicts_have_specific_entries(category):
     [
         ("test_session", "session", "HIGH", "SESS"),
         ("test_data_protection", "data_protection", "MEDIUM", "DATAP"),
+        ("test_oauth_flow", "oauth", "HIGH", "OAUTH"),
     ],
 )
 def test_phase1_modules_fully_wired_into_ledger(stem, category, severity, prefix):

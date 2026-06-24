@@ -70,6 +70,7 @@ TEST_SEVERITY_MAP: dict[str, str] = {
     "test_webhook_lemonsqueezy": "MEDIUM",    # replay finding is MEDIUM
     "test_session": "HIGH",                   # V7.4.1 logout/fixation are L1 HIGH
     "test_data_protection": "MEDIUM",         # no-store is MEDIUM; token-in-URL self-escalates to HIGH inline
+    "test_oauth_flow": "HIGH",                # token leakage / missing state+PKCE are HIGH; scope/nonce overridden MEDIUM
 }
 
 # Per-test severity overrides (test function name → severity).
@@ -95,6 +96,10 @@ _TEST_NAME_SEVERITY_OVERRIDES: dict[str, str] = {
     # but is a V14.3.2/CWE-524 data-protection control rated MEDIUM in
     # test_data_protection.py. Override so the same control reports consistently.
     "test_authenticated_response_is_not_cacheable": "MEDIUM",
+    # OAuth client controls: scope-minimisation (V10.2.3) and OIDC nonce (V10.5.1)
+    # are MEDIUM; the file-stem default (HIGH) covers token leakage / state / PKCE.
+    "test_oauth_requests_minimal_scopes": "MEDIUM",
+    "test_oauth_oidc_emits_nonce": "MEDIUM",
 }
 
 # Per-test category overrides (test function name → category).
@@ -147,6 +152,7 @@ TEST_CATEGORY_MAP: dict[str, str] = {
     "test_webhook_lemonsqueezy": "webhook_lemonsqueezy",
     "test_session": "session",
     "test_data_protection": "data_protection",
+    "test_oauth_flow": "oauth",
 }
 
 # ZAP alert name → endpoint path heuristic
@@ -204,6 +210,7 @@ _CATEGORY_PREFIXES: dict[str, str] = {
     "webhook_lemonsqueezy": "LMSQ",
     "session": "SESS",
     "data_protection": "DATAP",
+    "oauth": "OAUTH",
 }
 
 # Provider layer categories (direct-API tests, not app endpoints)
@@ -502,6 +509,17 @@ def _remediation_for_category(category: str, severity: str, stack_info: dict) ->
             "(never reuse a pre-auth token). Require recent re-authentication "
             "before sensitive account changes (password, email, MFA)."
         ),
+        "oauth": (
+            "On the OAuth authorization request, generate an unguessable `state` "
+            "and validate it on the callback (CSRF defence), send a PKCE "
+            "`code_challenge` with `code_challenge_method=S256`, request only the "
+            "scopes the feature needs, and for OIDC flows send a `nonce`. Never "
+            "return delegated-send access or refresh tokens to the browser — hold "
+            "them server-side in a secrets vault and expose only narrow "
+            "send/status endpoints. Confirm the authorization server enforces "
+            "redirect-URI exact-match, single-use authorization codes, and PKCE "
+            "(Google/Microsoft; verify via provider attestation, Track C)."
+        ),
         "zap": (
             "Review the flagged endpoint and apply the remediation recommended by the ZAP alert. "
             "Consult OWASP guidance for the specific vulnerability class."
@@ -548,6 +566,7 @@ def _root_cause_for_category(category: str) -> str:
         "anon_session": "Anonymous session merge RPC can be triggered without adequate ownership validation.",
         "session": "Session not invalidated on logout, reused across authentications, or sensitive changes allowed without re-authentication.",
         "data_protection": "Sensitive responses are cacheable (missing Cache-Control: no-store) or tokens/PII are exposed in URLs, query strings, or redirect Location headers.",
+        "oauth": "OAuth client flow omits a CSRF state, PKCE code_challenge, or OIDC nonce, requests excessive scopes, or serialises delegated-send tokens to the browser instead of holding them server-side.",
         "zap": "Vulnerability identified by automated ZAP scanner; see alert details.",
         "firebase_auth": "Firebase Auth adapter detected a blocking condition (MFA, App Check).",
         "firestore_rules": "Firestore Security Rules misconfigured — allows unauthorized read/write.",
@@ -649,6 +668,15 @@ def _why_it_matters_for_category(category: str) -> str:
             "credential. Sensitive responses cached by a shared proxy or the "
             "browser disk cache can be read back by a later user of the same "
             "machine or network, exposing other users' data."
+        ),
+        "oauth": (
+            "A missing OAuth `state` lets an attacker graft their own "
+            "authorization code into a victim's session (login CSRF); missing "
+            "PKCE lets an intercepted code be redeemed by an attacker; a missing "
+            "OIDC nonce allows ID-token replay. Over-broad scopes turn a single "
+            "leaked delegated-send token into access far beyond sending mail, and "
+            "a token serialised to the browser can be exfiltrated by any XSS or "
+            "logging sink and used to send mail or read data as the user."
         ),
         "zap": (
             "This vulnerability class can be exploited to compromise application "
