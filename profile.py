@@ -158,6 +158,96 @@ def _resolve_payment_path(data: dict, path_key: str) -> Any:
     return None
 
 
+def _validate_oauth_block(data: dict[str, Any]) -> None:
+    """Validate the optional ``oauth.delegated_send`` block shape.
+
+    Schema (every field optional — the OAuth probes skip when a field is absent):
+
+        oauth:
+          delegated_send:
+            provider: google            # google | microsoft (free-form string)
+            authorize_url: <app route that initiates the flow / 302s to the AS>
+            redirect_uris: [<callback url>, ...]
+            token_endpoint: <app BFF token-exchange route>
+            required_scopes: [<scope the app legitimately needs>, ...]
+            send_endpoints:   [{path: <str>, method: <str>, probe_body: <map>}, ...]
+            status_endpoints: [{path: <str>, method: <str>}, ...]
+
+    ``send_endpoints[].probe_body`` is the operator-supplied request body (e.g. a
+    safe test recipient) the §P1-D delegated-send write-probe sends; without it
+    the probe skips rather than sending a blind/malformed request. ``method``
+    defaults to POST (send) / GET (status) when omitted.
+
+    Raises ``ValueError`` if a present field has the wrong type, so a malformed
+    profile fails loudly at load time rather than a probe silently misreading it.
+    """
+    oauth = data.get("oauth")
+    if oauth is None:
+        return
+    if not isinstance(oauth, dict):
+        raise ValueError(
+            f"Profile field 'oauth' must be a mapping, got {type(oauth).__name__}"
+        )
+    ds = oauth.get("delegated_send")
+    if ds is None:
+        return
+    if not isinstance(ds, dict):
+        raise ValueError(
+            "Profile field 'oauth.delegated_send' must be a mapping, "
+            f"got {type(ds).__name__}"
+        )
+
+    for str_field in ("provider", "authorize_url", "token_endpoint"):
+        val = ds.get(str_field)
+        if val is not None and not isinstance(val, str):
+            raise ValueError(
+                f"Profile field 'oauth.delegated_send.{str_field}' must be a "
+                f"string, got {type(val).__name__}"
+            )
+
+    for list_field in ("redirect_uris", "required_scopes"):
+        val = ds.get(list_field)
+        if val is None:
+            continue
+        if not isinstance(val, list) or not all(isinstance(item, str) for item in val):
+            raise ValueError(
+                f"Profile field 'oauth.delegated_send.{list_field}' must be a "
+                f"list of strings, got {type(val).__name__}"
+            )
+
+    for ep_field in ("send_endpoints", "status_endpoints"):
+        val = ds.get(ep_field)
+        if val is None:
+            continue
+        if not isinstance(val, list):
+            raise ValueError(
+                f"Profile field 'oauth.delegated_send.{ep_field}' must be a list "
+                f"of endpoint mappings, got {type(val).__name__}"
+            )
+        for item in val:
+            if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                raise ValueError(
+                    f"Each entry in 'oauth.delegated_send.{ep_field}' must be a "
+                    "mapping with a string 'path' field"
+                )
+            method = item.get("method")
+            if method is not None and not isinstance(method, str):
+                raise ValueError(
+                    f"Entry method in 'oauth.delegated_send.{ep_field}' must be a "
+                    f"string when present, got {type(method).__name__}"
+                )
+            # probe_body drives the §P1-D delegated-send write-probe. A non-mapping
+            # value (e.g. a bare string) is coerced to {} downstream, which would
+            # SILENTLY skip the only live token-leakage check — reject it at load
+            # so a misconfigured profile fails loudly instead of looking clean.
+            probe_body = item.get("probe_body")
+            if probe_body is not None and not isinstance(probe_body, dict):
+                raise ValueError(
+                    f"probe_body in 'oauth.delegated_send.{ep_field}' must be a "
+                    f"mapping when present, got {type(probe_body).__name__}"
+                )
+
+
 def load_profile(path: str | Path) -> Profile:
     """Parse a YAML profile file and return a :class:`Profile` object.
 
@@ -218,6 +308,12 @@ def load_profile(path: str | Path) -> Profile:
                     "Profile field 'auth.verify_path' must be a string path "
                     f"starting with '/', got {verify_path!r}"
                 )
+
+    # Validate the optional oauth/delegated_send block (used by the §P1-B OAuth
+    # client-observable probes and §P1-D token-storage probe). Shape only — the
+    # probes skip cleanly when fields are absent, so every field is optional, but
+    # a present field must have the right type or a probe would misread it.
+    _validate_oauth_block(data)
 
     # Warn if source_file_map references endpoints not declared in the profile.
     import warnings as _warnings

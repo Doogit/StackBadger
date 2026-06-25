@@ -17,7 +17,7 @@ from typing import Any
 
 from discover import discover_live
 from exclusions import effective_exclude_paths, effective_exclude_tables
-from profile import Profile, load_profile
+from profile import Profile, load_profile, _validate_oauth_block
 from providers import ProviderManifest
 
 # Default stack used for the canonical black-box target (Clerk + Supabase + Stripe) and
@@ -232,6 +232,11 @@ def assemble_profile(
     else:
         auth_block.setdefault("verify_path", None)
 
+    # Re-validate the oauth/delegated_send block on the assembled dict: load_profile
+    # validated the YAML layer, but the env-override merge above can introduce
+    # oauth fields, so re-check the merged shape before any probe reads it.
+    _validate_oauth_block(data)
+
     # Validate minimum required fields.
     target = data.get("target")
     if not isinstance(target, dict) or not target.get("base_url"):
@@ -276,6 +281,20 @@ def _env_overrides() -> dict[str, Any]:
     fapi_host = os.environ.get("CLERK_FAPI_HOST")
     if fapi_host:
         overrides.setdefault("clerk", {})["frontend_api"] = fapi_host
+
+    # OAuth delegated-send overrides. The plan (§6) gates live OAuth probing on a
+    # staging/test-account flow, so an operator can repoint the authorize/token
+    # routes at a staging BFF for one run without editing the tracked profile —
+    # mirroring the SUPABASE_PROJECT_URL / CLERK_FAPI_HOST override pattern. Both
+    # land under oauth.delegated_send so the §P1-B/§P1-D probes read one shape.
+    oauth_authorize_url = os.environ.get("OAUTH_AUTHORIZE_URL")
+    oauth_token_endpoint = os.environ.get("OAUTH_TOKEN_ENDPOINT")
+    if oauth_authorize_url or oauth_token_endpoint:
+        ds = overrides.setdefault("oauth", {}).setdefault("delegated_send", {})
+        if oauth_authorize_url:
+            ds["authorize_url"] = oauth_authorize_url
+        if oauth_token_endpoint:
+            ds["token_endpoint"] = oauth_token_endpoint
 
     return overrides
 

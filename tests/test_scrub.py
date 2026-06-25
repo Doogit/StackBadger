@@ -13,7 +13,14 @@ _PKG_ROOT = Path(__file__).resolve().parent.parent
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
-from reports.scrub import _secrets_from_env, scrub_file, scrub_text
+from reports.scrub import (
+    _secrets_from_env,
+    contains_token_material,
+    scrub_evidence_body,
+    scrub_file,
+    scrub_locator,
+    scrub_text,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +198,206 @@ def test_secrets_from_env_expands_cookie_values(monkeypatch):
 def test_secrets_from_env_empty(monkeypatch):
     monkeypatch.delenv("ZAP_SCRUB_SECRETS", raising=False)
     assert _secrets_from_env() == ()
+
+
+# ---------------------------------------------------------------------------
+# OAuth / Gmail / Drive / M365 evidence-body redaction (scrub_evidence_body)
+# ---------------------------------------------------------------------------
+
+def test_evidence_body_redacts_google_access_token():
+    body = '{"access_token":"ya29.a0AfH6SMByExampleTokenValue123","expires_in":3599}'
+    out = scrub_evidence_body(body)
+    assert "ya29.a0AfH6SMByExampleTokenValue123" not in out
+    # JSON field-value redaction fires on the access_token field.
+    assert "[REDACTED_TOKEN_VALUE]" in out
+    # Field name preserved so a leak finding still shows what was exposed.
+    assert '"access_token"' in out
+    # expires_in (non-secret) survives.
+    assert "3599" in out
+
+
+def test_evidence_body_redacts_google_refresh_token_bare():
+    # A bare refresh token with no JSON wrapper (the shape-pass must catch it).
+    body = "token is 1//0eXampleRefreshTokenValue_abc-DEF here"
+    out = scrub_evidence_body(body)
+    assert "1//0eXampleRefreshTokenValue_abc-DEF" not in out
+    assert "[REDACTED_OAUTH_TOKEN]" in out
+
+
+def test_evidence_body_redacts_client_secret_field():
+    body = '{"client_secret":"GOCSPX-supersecretvalue123","grant_type":"refresh_token"}'
+    out = scrub_evidence_body(body)
+    assert "GOCSPX-supersecretvalue123" not in out
+    assert '"client_secret":"[REDACTED_TOKEN_VALUE]"' in out
+    # grant_type is not a secret field — left intact.
+    assert "refresh_token" in out
+
+
+def test_evidence_body_wholesale_redacts_gmail_payload():
+    body = '{"id":"18c","snippet":"Hi Bob, the invoice is attached","threadId":"18c"}'
+    out = scrub_evidence_body(body)
+    assert "Hi Bob" not in out
+    assert "invoice" not in out
+    assert "restricted-scope content" in out
+
+
+def test_evidence_body_wholesale_redacts_drive_payload():
+    body = '{"name":"Q3-financials.pdf","webContentLink":"https://drive/download/abc"}'
+    out = scrub_evidence_body(body)
+    assert "Q3-financials.pdf" not in out
+    assert "restricted-scope content" in out
+
+
+def test_evidence_body_redacts_by_sensitive_url_host():
+    # A binary/opaque Drive blob with no JSON markers — the URL host triggers it.
+    body = "PK\x03\x04 binary zip bytes pretending to be a drive export"
+    out = scrub_evidence_body(body, url="https://www.googleapis.com/drive/v3/files/abc?alt=media")
+    assert "binary zip bytes" not in out
+    assert "restricted-scope content" in out
+
+
+def test_evidence_body_preserves_benign_app_response():
+    # A normal app JSON response with no token shapes / Gmail markers is untouched
+    # so ordinary evidence stays debuggable (e.g. an IDOR finding's body).
+    body = '{"id":42,"owner":"user_b","status":"ok"}'
+    assert scrub_evidence_body(body) == body
+
+
+def test_evidence_body_email_in_plain_app_response_kept():
+    # An email in a generic app response is NOT redacted (it may BE the finding,
+    # e.g. an IDOR leaking another user's address); only Gmail/Drive payloads are
+    # wholesale-redacted. This pins that scoping decision.
+    body = '{"contact":"victim@example.com"}'
+    assert scrub_evidence_body(body) == body
+
+
+def test_evidence_body_still_redacts_bearer_and_jwt():
+    # scrub_evidence_body composes the base scrub_text passes.
+    jwt = "eyJ" + "A1b2C3d4E5f6G7h8I9j0" + ".payloadpart.sigpart"
+    out = scrub_evidence_body(f'{{"authorization":"Bearer {jwt}"}}')
+    assert "payloadpart" not in out
+    assert "Bearer [REDACTED]" in out or "[REDACTED_JWT]" in out
+
+
+def test_evidence_body_empty_passthrough():
+    assert scrub_evidence_body("") == ""
+    assert scrub_evidence_body("[body omitted]") == "[body omitted]"
+
+
+def test_evidence_body_redacts_google_client_secret():
+    body = '{"grant_type":"refresh_token","client_secret":"GOCSPX-supersecretvalue123"}'
+    out = scrub_evidence_body(body)
+    assert "GOCSPX-supersecretvalue123" not in out
+    # Either the bare-shape pass or the field-value pass redacts it.
+    assert "[REDACTED" in out
+
+
+def test_evidence_body_single_weak_marker_not_wholesale_redacted():
+    # Regression: a benign app body that merely uses one Gmail-ish field name
+    # ("historyId") must NOT be wholesale-redacted — that would destroy unrelated
+    # findings' evidence. Requires 2+ weak markers (or a strong/host marker).
+    body = '{"historyId": 5, "status": "ok", "items": 3}'
+    assert scrub_evidence_body(body) == body
+
+
+def test_evidence_body_two_weak_markers_wholesale_redacted():
+    body = '{"snippet":"Hi Bob","threadId":"18c","subject":"x"}'
+    out = scrub_evidence_body(body)
+    assert "Hi Bob" not in out
+    assert "restricted-scope content" in out
+
+
+def test_evidence_body_strong_marker_alone_redacted():
+    body = '{"name":"q3.pdf","webContentLink":"https://drive/x"}'
+    out = scrub_evidence_body(body)
+    assert "q3.pdf" not in out
+    assert "restricted-scope content" in out
+
+
+def test_evidence_body_graph_host_triggers_redaction():
+    body = '{"value":[{"subject":"Invoice","from":"a@b.com"}]}'
+    out = scrub_evidence_body(body, url="https://graph.microsoft.com/v1.0/me/messages")
+    assert "Invoice" not in out
+    assert "restricted-scope content" in out
+
+
+# ---------------------------------------------------------------------------
+# scrub_locator — URL field + non-credential header values
+# ---------------------------------------------------------------------------
+
+def test_locator_redacts_oauth_code_query_param_keeps_path():
+    url = "https://example.com/api/oauth/callback?code=4/0AeXampleAuthCode123&state=abc"
+    out = scrub_locator(url)
+    assert "4/0AeXampleAuthCode123" not in out
+    assert "code=[REDACTED]" in out
+    # Host/path and non-secret state survive for debugging.
+    assert "https://example.com/api/oauth/callback" in out
+    assert "state=abc" in out
+
+
+def test_locator_redacts_implicit_flow_access_token_fragment():
+    url = "https://example.com/cb#access_token=ya29.aLiveTokenValue1234567890&token_type=Bearer"
+    out = scrub_locator(url)
+    assert "ya29.aLiveTokenValue1234567890" not in out
+    assert "access_token=[REDACTED]" in out or "[REDACTED_OAUTH_TOKEN]" in out
+
+
+def test_locator_redacts_bearer_in_header_value():
+    out = scrub_locator("Bearer eyJabcdefghijklmnopqrstuvwxyz0123")
+    assert "Bearer [REDACTED]" in out or "[REDACTED_JWT]" in out
+
+
+def test_locator_preserves_benign_url():
+    url = "https://example.com/api/items?page=2&sort=name"
+    assert scrub_locator(url) == url
+
+
+def test_locator_empty_passthrough():
+    assert scrub_locator("") == ""
+
+
+# ---------------------------------------------------------------------------
+# contains_token_material — shared leak-detection vocabulary (V10.1.1 probe)
+# ---------------------------------------------------------------------------
+
+def test_contains_token_material_detects_full_vocabulary():
+    for leak in (
+        '{"access_token":"ya29.aLongLivedTokenValue1234567890"}',
+        '{"refresh_token":"1//0eLongRefreshTokenValueABCdef"}',
+        '{"id_token":"eyJhbGciOiJSUzI1NiJ9.payloadpart.signature"}',
+        '{"token":"aVeryLongOpaqueTokenValue1234567890"}',
+        '{"client_secret":"GOCSPX-superLongClientSecret1234567890"}',
+        '{"authorization_code":"4/0AeLongAuthorizationCodeValue123"}',
+        # form-encoded / query serialisations
+        "access_token=aVeryLongOpaqueAccessTokenValue1234567890",
+        "x=1&refresh_token=1//0eLongRefreshTokenValueABCdef",
+        # bare shapes with no field wrapper
+        "go to ya29.aLongLivedTokenValue1234567890",
+        "GOCSPX-superLongClientSecret1234567890",
+    ):
+        assert contains_token_material(leak), leak
+
+
+def test_contains_token_material_ignores_benign():
+    for benign in (
+        "",
+        '{"connected": true, "email_count": 3}',
+        '{"access_token_expired": false}',     # field name, no value
+        '{"refresh_token_present": true}',
+        '{"access_token": null}',
+        '{"access_token": "x"}',               # value too short
+        '{"code": 200, "status": "ok"}',       # generic 'code' is not a token field
+        "csrf_token=aVeryLongCsrfValueExceedingSixteen",  # \b excludes the tail
+    ):
+        assert not contains_token_material(benign), benign
+
+
+def test_contains_token_material_not_narrower_than_scrubber():
+    # The leak detector must flag anything the scrubber would redact as a token
+    # VALUE — guards against the probe silently passing a real disclosure.
+    leak = '{"token":"aVeryLongOpaqueTokenValue1234567890"}'
+    assert contains_token_material(leak)
+    assert "aVeryLongOpaqueTokenValue1234567890" not in scrub_evidence_body(leak)
 
 
 # ---------------------------------------------------------------------------

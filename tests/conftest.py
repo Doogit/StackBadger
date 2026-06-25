@@ -61,6 +61,7 @@ from exclusions import (  # noqa: E402
 )
 from profile import load_profile  # noqa: E402
 from profile_assembler import assemble_profile  # noqa: E402
+from reports.scrub import scrub_evidence_body, scrub_locator  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -714,37 +715,53 @@ class EvidenceCapture:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    _REDACTED_HEADERS = {"authorization", "apikey", "x-internal-secret", "set-cookie"}
+    _REDACTED_HEADERS = {
+        "authorization", "apikey", "x-internal-secret", "set-cookie", "cookie",
+    }
 
     def _build_record(self, response: httpx.Response, label: str) -> dict:
         req = response.request
+        url = str(req.url)
+        # Every field that can carry a credential is scrubbed before it touches
+        # disk (plan §6 evidence-redaction gate): bodies via scrub_evidence_body
+        # (tokens + wholesale Gmail/Drive/M365 content), the request URL and
+        # header values via scrub_locator (a token can ride in a ?code= /
+        # #access_token= query/fragment or a Location/Cookie header), and
+        # credential-named headers via the _scrub_headers denylist.
         record: dict = {
             "_label": label,
             "timestamp": datetime.now(tz=timezone.utc).isoformat(),
             "request": {
                 "method": req.method,
-                "url": str(req.url),
+                "url": scrub_locator(url),
                 "headers": self._scrub_headers(dict(req.headers)),
-                "body": self._safe_request_body(req),
+                "body": scrub_evidence_body(self._safe_request_body(req), url=url),
             },
             "response": {
                 "status_code": response.status_code,
                 "headers": self._scrub_headers(dict(response.headers)),
-                "body": self._decode_content(response.content),
+                "body": scrub_evidence_body(self._decode_content(response.content), url=url),
             },
         }
         return record
 
     @classmethod
     def _scrub_headers(cls, headers: dict) -> dict:
-        """Redact credential-bearing headers to avoid persisting tokens to disk."""
+        """Redact credential-bearing headers to avoid persisting tokens to disk.
+
+        Credential-named headers (Authorization, Cookie, ...) are redacted to a
+        short prefix. Every OTHER header value still runs through scrub_locator so
+        a token riding in a non-denylisted header — a ``Location`` redirect with
+        ``?code=`` / ``#access_token=``, or a Bearer/JWT reflected in a custom
+        header — is also caught while non-secret header text is preserved.
+        """
         scrubbed = {}
         for key, value in headers.items():
             if key.lower() in cls._REDACTED_HEADERS:
                 # Keep the prefix for debugging but redact the secret portion.
                 scrubbed[key] = value[:15] + "[REDACTED]" if len(value) > 15 else "[REDACTED]"
             else:
-                scrubbed[key] = value
+                scrubbed[key] = scrub_locator(value)
         return scrubbed
 
     def _write(self, record: dict, label: str) -> None:
