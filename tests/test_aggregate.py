@@ -298,6 +298,12 @@ def test_phase2_modules_fully_wired_into_ledger(stem, category, severity, prefix
         ("test_trace_method_is_rejected", "method_hardening", "MEDIUM", "METH"),
         ("test_state_change_requires_anti_csrf_token", "csrf", "HIGH", "CSRF"),
         ("test_csp_frame_ancestors_restricts_framing", "frame_ancestors", "MEDIUM", "FRAME"),
+        # §P2-C file-handling probes (extend test_file_upload.py).
+        ("test_upload_zip_bomb_rejected", "file_dos", "MEDIUM", "FDOS"),
+        ("test_served_upload_sets_content_disposition", "file_serve", "MEDIUM", "FSERVE"),
+        # §P2-D auth-delta probes (extend test_auth_flows.py).
+        ("test_registration_rejects_weak_password", "password_policy", "MEDIUM", "PWPOL"),
+        ("test_signin_response_is_enumeration_safe", "user_enumeration", "MEDIUM", "ENUM"),
     ],
 )
 def test_phase2_per_test_override_modules_wired_into_ledger(
