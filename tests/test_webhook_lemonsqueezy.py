@@ -142,6 +142,8 @@ def _get_webhook_secret(profile) -> str | None:
 
 
 @pytest.mark.lemonsqueezy
+@pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+@pytest.mark.cwe("345")  # insufficient verification of data authenticity
 class TestLemonSqueezyWebhookSignature:
     """Probe LemonSqueezy webhook endpoint for signature enforcement weaknesses."""
 

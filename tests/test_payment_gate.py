@@ -95,6 +95,8 @@ def _postgrest_url(profile, table: str) -> str:
 
 @pytest.mark.stripe
 @pytest.mark.clerk
+@pytest.mark.asvs("8.2.1")  # function-level access restricted to explicitly-permitted consumers
+@pytest.mark.cwe("840")  # business logic / payment-gate bypass
 @pytest.mark.parametrize("path", _PAYMENT_GATED_PATHS, ids=_PAYMENT_GATED_PATHS)
 def test_payment_gated_endpoint_rejects_unpaid_user(path, profile, user_a_client, evidence):
     """Payment-gated endpoint must return 402 or 403 for an unpaid user.
@@ -127,6 +129,8 @@ def test_payment_gated_endpoint_rejects_unpaid_user(path, profile, user_a_client
 
 @pytest.mark.stripe
 @pytest.mark.supabase
+@pytest.mark.asvs("8.2.1")  # function-level access restricted to explicitly-permitted consumers
+@pytest.mark.cwe("840")  # business logic / payment-gate bypass
 def test_payment_column_not_readable_via_rest(profile, user_a_client, evidence):
     """User A attempts to SELECT the payment gate column via PostgREST.
 
@@ -212,6 +216,8 @@ def test_payment_column_not_readable_via_rest(profile, user_a_client, evidence):
 @pytest.mark.write_probe
 @pytest.mark.stripe
 @pytest.mark.supabase
+@pytest.mark.asvs("8.2.1")  # function-level access restricted to explicitly-permitted consumers
+@pytest.mark.cwe("840")  # business logic / payment-gate bypass
 def test_direct_paid_at_manipulation_blocked(profile, user_a_client, auth_adapter, evidence):
     """RLS must prevent a user from setting their own paid_at via PostgREST.
 
@@ -313,6 +319,8 @@ def test_direct_paid_at_manipulation_blocked(profile, user_a_client, auth_adapte
 @pytest.mark.write_probe
 @pytest.mark.stripe
 @pytest.mark.clerk
+@pytest.mark.asvs("8.2.1")  # function-level access restricted to explicitly-permitted consumers
+@pytest.mark.cwe("840")  # business logic / payment-gate bypass
 @pytest.mark.parametrize("tamper_case,body_override,description", [
     (
         "tampered_user_id",
