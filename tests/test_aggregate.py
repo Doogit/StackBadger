@@ -258,6 +258,29 @@ def test_phase1_modules_fully_wired_into_ledger(stem, category, severity, prefix
     )
 
 
+# Phase-2 ASVS coverage-ceiling modules carry the same ledger DoD as Phase 1:
+# every new module must be fully wired or its HIGH findings silently downgrade
+# to MEDIUM/api_surface and the run.sh exit-1 gate breaks.
+@pytest.mark.parametrize(
+    "stem,category,severity,prefix",
+    [
+        ("test_mass_assignment", "mass_assignment", "HIGH", "MASS"),
+    ],
+)
+def test_phase2_modules_fully_wired_into_ledger(stem, category, severity, prefix):
+    assert TEST_SEVERITY_MAP.get(stem) == severity
+    assert TEST_CATEGORY_MAP.get(stem) == category
+    assert _CATEGORY_PREFIXES.get(category) == prefix
+    # Content dicts must return module-specific (non-generic) text.
+    assert _remediation_for_category(category, severity, {}) != (
+        "Review the flagged code path and apply secure coding best practices."
+    )
+    assert _root_cause_for_category(category) != "Unclassified vulnerability."
+    assert _why_it_matters_for_category(category) != (
+        "This vulnerability may impact application security."
+    )
+
+
 def test_coverage_matrix_excludes_provider_categories():
     profile = {"endpoints": {"core": [{"path": "/api/login"}]}}
     findings = [

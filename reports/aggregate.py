@@ -71,6 +71,7 @@ TEST_SEVERITY_MAP: dict[str, str] = {
     "test_session": "HIGH",                   # V7.4.1 logout/fixation are L1 HIGH
     "test_data_protection": "MEDIUM",         # no-store is MEDIUM; token-in-URL self-escalates to HIGH inline
     "test_oauth_flow": "HIGH",                # token leakage / missing state+PKCE are HIGH; scope/nonce overridden MEDIUM
+    "test_mass_assignment": "HIGH",           # persisted privileged field = privilege escalation (CWE-915)
 }
 
 # Per-test severity overrides (test function name → severity).
@@ -153,6 +154,7 @@ TEST_CATEGORY_MAP: dict[str, str] = {
     "test_session": "session",
     "test_data_protection": "data_protection",
     "test_oauth_flow": "oauth",
+    "test_mass_assignment": "mass_assignment",
 }
 
 # ZAP alert name → endpoint path heuristic
@@ -211,6 +213,7 @@ _CATEGORY_PREFIXES: dict[str, str] = {
     "session": "SESS",
     "data_protection": "DATAP",
     "oauth": "OAUTH",
+    "mass_assignment": "MASS",
 }
 
 # Provider layer categories (direct-API tests, not app endpoints)
@@ -520,6 +523,16 @@ def _remediation_for_category(category: str, severity: str, stack_info: dict) ->
             "redirect-URI exact-match, single-use authorization codes, and PKCE "
             "(Google/Microsoft; verify via provider attestation, Track C)."
         ),
+        "mass_assignment": (
+            "Allow-list the fields each write handler may bind from the request "
+            "body; never spread a client object onto the stored record. For "
+            "PostgREST, restrict writable columns with column-level GRANTs and an "
+            "RLS WITH CHECK clause so privileged columns (role, is_admin, "
+            "ownership, balances) cannot be set by the client role. For Firestore, "
+            "block writes to privilege-bearing fields in Security Rules unless the "
+            "request carries the appropriate custom claim. Strip or reject unknown "
+            "keys at the API boundary."
+        ),
         "zap": (
             "Review the flagged endpoint and apply the remediation recommended by the ZAP alert. "
             "Consult OWASP guidance for the specific vulnerability class."
@@ -567,6 +580,7 @@ def _root_cause_for_category(category: str) -> str:
         "session": "Session not invalidated on logout, reused across authentications, or sensitive changes allowed without re-authentication.",
         "data_protection": "Sensitive responses are cacheable (missing Cache-Control: no-store) or tokens/PII are exposed in URLs, query strings, or redirect Location headers.",
         "oauth": "OAuth client flow omits a CSRF state, PKCE code_challenge, or OIDC nonce, requests excessive scopes, or serialises delegated-send tokens to the browser instead of holding them server-side.",
+        "mass_assignment": "The write handler binds client-supplied fields onto the stored object instead of allow-listing writable columns, so a privileged field (role, is_admin, balance) included in the payload is persisted.",
         "zap": "Vulnerability identified by automated ZAP scanner; see alert details.",
         "firebase_auth": "Firebase Auth adapter detected a blocking condition (MFA, App Check).",
         "firestore_rules": "Firestore Security Rules misconfigured — allows unauthorized read/write.",
@@ -677,6 +691,13 @@ def _why_it_matters_for_category(category: str) -> str:
             "leaked delegated-send token into access far beyond sending mail, and "
             "a token serialised to the browser can be exfiltrated by any XSS or "
             "logging sink and used to send mail or read data as the user."
+        ),
+        "mass_assignment": (
+            "If a client can set a privileged field the UI never exposes "
+            "(is_admin, role, balance, a verification flag), it can escalate its "
+            "own privileges, grant itself paid entitlements, or tamper with "
+            "balances directly from a write payload, with no other vulnerability "
+            "required."
         ),
         "zap": (
             "This vulnerability class can be exploited to compromise application "
