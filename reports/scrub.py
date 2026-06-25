@@ -120,6 +120,45 @@ _TOKEN_FIELD_RE = re.compile(
     r'("(?:' + "|".join(_TOKEN_FIELD_NAMES) + r')"\s*:\s*)"[^"]*"'
 )
 
+# --- Token-DISCLOSURE detection (shared by the V10.1.1 leak probe) ----------
+# The redaction regex above redacts ANY value (even short/empty) — safe to
+# over-redact evidence. DETECTION is the opposite trade-off: it must flag a real
+# disclosure without false-positiving on a benign field NAME (e.g.
+# {"access_token_expired": false}), so it requires a NON-TRIVIAL value (>=16
+# chars). Both detection and redaction draw on the SAME field-name vocabulary
+# (_TOKEN_FIELD_NAMES) so the probe can never be narrower than the scrubber.
+#
+# JSON form: "access_token":"<16+ chars>". Form/query form: access_token=<16+>
+# (\b prevents matching the tail of an unrelated key such as csrf_token=).
+_TOKEN_VALUE_JSON_RE = re.compile(
+    r'"(?:' + "|".join(_TOKEN_FIELD_NAMES) + r')"\s*:\s*"[^"]{16,}"'
+)
+_TOKEN_VALUE_FORM_RE = re.compile(
+    r"\b(?:" + "|".join(_TOKEN_FIELD_NAMES) + r")=[^&\s\"'<>#]{16,}",
+    re.IGNORECASE,
+)
+
+
+def contains_token_material(text: str) -> bool:
+    """True when *text* discloses an OAuth token / secret VALUE.
+
+    Single source of truth for the §P1-D leak probe so its detection can never be
+    narrower than the redactor: covers bare Google access/refresh/client-secret
+    shapes plus any value-bearing token field from :data:`_TOKEN_FIELD_NAMES` in
+    either JSON (``"token":"..."``) or form/query (``access_token=...``) form.
+    Requires a non-trivial value, so a benign field name with no real value (e.g.
+    ``{"access_token_expired": false}``) is not a false positive.
+    """
+    if not text:
+        return False
+    return bool(
+        _GOOGLE_ACCESS_TOKEN_RE.search(text)
+        or _GOOGLE_REFRESH_TOKEN_RE.search(text)
+        or _GOOGLE_CLIENT_SECRET_RE.search(text)
+        or _TOKEN_VALUE_JSON_RE.search(text)
+        or _TOKEN_VALUE_FORM_RE.search(text)
+    )
+
 # Sensitive query-string / fragment params whose VALUE is a credential or an
 # authorization code carried in a URL (OAuth callback ``?code=`` or implicit-flow
 # ``#access_token=``). Value preserved-key, redacted-value; stops at the next

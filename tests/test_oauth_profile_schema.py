@@ -197,6 +197,19 @@ def test_load_profile_accepts_send_endpoint_probe_body(tmp_path):
     assert ep.probe_body.to == "sink@example.com"
 
 
+def test_load_profile_rejects_non_mapping_probe_body(tmp_path):
+    # A bare-string probe_body would be silently coerced to {} downstream and
+    # skip the only live delegated-send leak check — reject it at load time.
+    with pytest.raises(ValueError, match="probe_body in 'oauth.delegated_send.send_endpoints'"):
+        load_profile(
+            _write_profile(
+                tmp_path,
+                "oauth:\n  delegated_send:\n    send_endpoints:\n"
+                '      - path: /api/send\n        probe_body: "sink@example.com"\n',
+            )
+        )
+
+
 # ---------------------------------------------------------------------------
 # profile_assembler carry-through + env overrides
 # ---------------------------------------------------------------------------

@@ -236,6 +236,16 @@ def _validate_oauth_block(data: dict[str, Any]) -> None:
                     f"Entry method in 'oauth.delegated_send.{ep_field}' must be a "
                     f"string when present, got {type(method).__name__}"
                 )
+            # probe_body drives the §P1-D delegated-send write-probe. A non-mapping
+            # value (e.g. a bare string) is coerced to {} downstream, which would
+            # SILENTLY skip the only live token-leakage check — reject it at load
+            # so a misconfigured profile fails loudly instead of looking clean.
+            probe_body = item.get("probe_body")
+            if probe_body is not None and not isinstance(probe_body, dict):
+                raise ValueError(
+                    f"probe_body in 'oauth.delegated_send.{ep_field}' must be a "
+                    f"mapping when present, got {type(probe_body).__name__}"
+                )
 
 
 def load_profile(path: str | Path) -> Profile:

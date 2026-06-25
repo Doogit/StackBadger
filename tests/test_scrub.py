@@ -15,6 +15,7 @@ if str(_PKG_ROOT) not in sys.path:
 
 from reports.scrub import (
     _secrets_from_env,
+    contains_token_material,
     scrub_evidence_body,
     scrub_file,
     scrub_locator,
@@ -353,6 +354,50 @@ def test_locator_preserves_benign_url():
 
 def test_locator_empty_passthrough():
     assert scrub_locator("") == ""
+
+
+# ---------------------------------------------------------------------------
+# contains_token_material — shared leak-detection vocabulary (V10.1.1 probe)
+# ---------------------------------------------------------------------------
+
+def test_contains_token_material_detects_full_vocabulary():
+    for leak in (
+        '{"access_token":"ya29.aLongLivedTokenValue1234567890"}',
+        '{"refresh_token":"1//0eLongRefreshTokenValueABCdef"}',
+        '{"id_token":"eyJhbGciOiJSUzI1NiJ9.payloadpart.signature"}',
+        '{"token":"aVeryLongOpaqueTokenValue1234567890"}',
+        '{"client_secret":"GOCSPX-superLongClientSecret1234567890"}',
+        '{"authorization_code":"4/0AeLongAuthorizationCodeValue123"}',
+        # form-encoded / query serialisations
+        "access_token=aVeryLongOpaqueAccessTokenValue1234567890",
+        "x=1&refresh_token=1//0eLongRefreshTokenValueABCdef",
+        # bare shapes with no field wrapper
+        "go to ya29.aLongLivedTokenValue1234567890",
+        "GOCSPX-superLongClientSecret1234567890",
+    ):
+        assert contains_token_material(leak), leak
+
+
+def test_contains_token_material_ignores_benign():
+    for benign in (
+        "",
+        '{"connected": true, "email_count": 3}',
+        '{"access_token_expired": false}',     # field name, no value
+        '{"refresh_token_present": true}',
+        '{"access_token": null}',
+        '{"access_token": "x"}',               # value too short
+        '{"code": 200, "status": "ok"}',       # generic 'code' is not a token field
+        "csrf_token=aVeryLongCsrfValueExceedingSixteen",  # \b excludes the tail
+    ):
+        assert not contains_token_material(benign), benign
+
+
+def test_contains_token_material_not_narrower_than_scrubber():
+    # The leak detector must flag anything the scrubber would redact as a token
+    # VALUE — guards against the probe silently passing a real disclosure.
+    leak = '{"token":"aVeryLongOpaqueTokenValue1234567890"}'
+    assert contains_token_material(leak)
+    assert "aVeryLongOpaqueTokenValue1234567890" not in scrub_evidence_body(leak)
 
 
 # ---------------------------------------------------------------------------

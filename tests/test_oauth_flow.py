@@ -53,12 +53,10 @@ if str(_PKG_ROOT) not in _sys.path:
 
 from conftest import endpoints_for_category, probe_body_for  # noqa: E402,F401
 from helpers import FakeResponse, auth_provider as _auth_provider, safe_text as _safe_text  # noqa: E402
-# Reuse the canonical token-shape regexes from the scrubber so the probe's
-# leak-detection and the evidence redactor cannot drift apart.
-from reports.scrub import (  # noqa: E402
-    _GOOGLE_ACCESS_TOKEN_RE as _ACCESS_TOKEN_RE,
-    _GOOGLE_REFRESH_TOKEN_RE as _REFRESH_TOKEN_RE,
-)
+# Reuse the scrubber's token-disclosure detector so the leak probe can never be
+# narrower than the evidence redactor (same field-name vocabulary + bare shapes,
+# JSON and form/query serialisations).
+from reports.scrub import contains_token_material as _contains_token_material  # noqa: E402
 
 # OIDC / framework scopes that are benign regardless of the declared API scopes:
 # they grant identity/login or offline refresh, not restricted data access, so a
@@ -79,16 +77,6 @@ _BENIGN_SCOPES = frozenset(
     }
 )
 
-# A JSON token field carrying a NON-TRIVIAL value (>=16 chars). The V10.1.1
-# leakage probes flag a token VALUE, never a bare field-NAME substring — a status
-# endpoint reporting {"access_token_expired": false} or {"refresh_token_present":
-# true} merely NAMES a token and must not trip a finding. Real Google/Microsoft
-# token responses serialise access/refresh/id tokens as long quoted strings, so a
-# 16+ char quoted value is the discriminator. Bare Google token shapes (ya29. /
-# 1//) are caught by the imported scrub regexes regardless of quoting.
-_TOKEN_VALUE_FIELD_RE = re.compile(
-    r'"(?:access_token|refresh_token|id_token)"\s*:\s*"[^"]{16,}"'
-)
 
 
 # ---------------------------------------------------------------------------
@@ -346,13 +334,14 @@ def test_oauth_as_owned_controls_are_attested(profile):
 # ---------------------------------------------------------------------------
 
 def _assert_no_token_in_body(body: str, where: str) -> None:
-    """Fail when a response body carries OAuth token material (a token VALUE)."""
-    leak = (
-        _ACCESS_TOKEN_RE.search(body)
-        or _REFRESH_TOKEN_RE.search(body)
-        or _TOKEN_VALUE_FIELD_RE.search(body)
-    )
-    assert not leak, (
+    """Fail when a response body carries OAuth token material (a token VALUE).
+
+    Delegates to the scrubber's :func:`contains_token_material` so the probe
+    flags exactly what the redactor treats as secret-bearing (access/refresh/id
+    tokens, ``token``, ``client_secret``, ``authorization_code`` — in JSON or
+    form-encoded bodies — plus bare Google shapes), never a narrower set.
+    """
+    assert not _contains_token_material(body), (
         f"{where} returned OAuth token material to the browser. Delegated-send "
         "access/refresh tokens must be held server-side (e.g. a secrets vault) "
         "and never serialised to a client response (ASVS V10.1.1, CWE-522)."
@@ -538,9 +527,17 @@ def test_assert_no_token_in_body_flags_token_material():
         '{"access_token":"ya29.a0AfH6SMByExampleTokenValue1234567890"}',
         '{"refresh_token":"1//0eXampleRefreshTokenValue_abc-DEF"}',
         '{"id_token":"eyJhbGciOiJSUzI1NiIsImtpZCI6IjEyMyJ9.payload.sig"}',
-        # Bare Google token shape with no JSON wrapper (shape-only path).
+        # Broadened to the scrubber's full vocabulary: a generic "token" field,
+        # an OAuth client secret, and an authorization code with a real value.
+        '{"token":"aVeryLongOpaqueTokenValue1234567890"}',
+        '{"client_secret":"superLongClientSecretValue1234567890"}',
+        '{"authorization_code":"4/0AeXampleAuthorizationCodeValue123"}',
+        # Form-encoded / query serialisations (not just JSON).
+        "access_token=aVeryLongOpaqueAccessTokenValue1234567890&token_type=Bearer",
+        "grant=x&refresh_token=1//0eAnotherLongRefreshTokenValueABC",
+        # Bare Google token shape with no field wrapper (shape-only path).
         "token is 1//0eXampleRefreshTokenValue_abc-DEF here",
-        "token=ya29.a0AfH6SMByExampleToken12345",
+        "redirect to ya29.a0AfH6SMByExampleToken12345 now",
     ):
         with pytest.raises(AssertionError):
             _assert_no_token_in_body(leak, "test")
@@ -561,6 +558,10 @@ def test_assert_no_token_in_body_ignores_field_name_substring():
         '{"refresh_token_present": true}',
         '{"has_access_token": false, "connected": true}',
         '{"access_token": null}',
-        '{"access_token": "x"}',  # value too short to be a real token
+        '{"access_token": "x"}',          # value too short to be a real token
+        '{"code": 200, "status": "ok"}',  # generic "code" is not a token field
+        # \b stops the 'token=' alternative matching the tail of csrf_token, even
+        # with a long value (boundary, not length, is what excludes it).
+        "csrf_token=aVeryLongCsrfValueExceedingSixteenChars",
     ):
         _assert_no_token_in_body(benign, "test")
