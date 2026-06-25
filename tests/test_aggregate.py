@@ -17,8 +17,11 @@ from reports.aggregate import (
     _CATEGORY_PREFIXES,
     _PROVIDER_CATEGORIES,
     _PROVIDER_LAYER_MAP,
+    _TEST_NAME_CATEGORY_OVERRIDES,
+    _TEST_NAME_SEVERITY_OVERRIDES,
     _coverage_matrix,
     _endpoint_categories,
+    _extract_severity_from_message,
     _is_standalone_finding_payload,
     _remediation_for_category,
     _root_cause_for_category,
@@ -27,6 +30,7 @@ from reports.aggregate import (
     TEST_CATEGORY_MAP,
     TEST_SEVERITY_MAP,
     build_evidence_findings,
+    build_pytest_findings,
     failed_test_names,
     load_evidence,
     render_html,
@@ -279,6 +283,86 @@ def test_phase2_modules_fully_wired_into_ledger(stem, category, severity, prefix
     assert _why_it_matters_for_category(category) != (
         "This vulnerability may impact application security."
     )
+
+
+# Phase-2 §P2-B/§P2-E probes EXTEND existing modules (test_api_surface.py,
+# test_cors_headers.py) rather than adding a new file stem, so they attach their
+# category and severity through the per-test-NAME override maps. The stem-based
+# guards above cannot see them. Guard the function-level wiring directly: without
+# the category override the finding files under api_surface/cors_headers; without
+# the prefix the id falls back to FIND-; without the severity override a HIGH CSRF
+# finding silently downgrades and breaks the run.sh exit-1 gate.
+@pytest.mark.parametrize(
+    "test_func,category,severity,prefix",
+    [
+        ("test_trace_method_is_rejected", "method_hardening", "MEDIUM", "METH"),
+        ("test_state_change_requires_anti_csrf_token", "csrf", "HIGH", "CSRF"),
+        ("test_csp_frame_ancestors_restricts_framing", "frame_ancestors", "MEDIUM", "FRAME"),
+    ],
+)
+def test_phase2_per_test_override_modules_wired_into_ledger(
+    test_func, category, severity, prefix
+):
+    assert _TEST_NAME_CATEGORY_OVERRIDES.get(test_func) == category
+    assert _TEST_NAME_SEVERITY_OVERRIDES.get(test_func) == severity
+    assert _CATEGORY_PREFIXES.get(category) == prefix
+    # Content dicts must return module-specific (non-generic) text.
+    assert _remediation_for_category(category, severity, {}) != (
+        "Review the flagged code path and apply secure coding best practices."
+    )
+    assert _root_cause_for_category(category) != "Unclassified vulnerability."
+    assert _why_it_matters_for_category(category) != (
+        "This vulnerability may impact application security."
+    )
+
+
+def test_inline_high_escalation_from_frame_ancestors_pytest_fail():
+    """The frame-ancestors probe self-escalates to HIGH via an inline 'HIGH:' in
+    its pytest.fail() message when the page is framable by any origin. The MEDIUM
+    floor in _TEST_NAME_SEVERITY_OVERRIDES would otherwise cap it, so guard that
+    the aggregator lifts the longrepr to HIGH. Without this the run.sh exit-1 gate
+    would not fire on a fully-clickjackable page.
+    """
+    # pytest.fail("HIGH: ...") yields a longrepr prefixed with "Failed: ".
+    high_longrepr = (
+        "Failed: HIGH: CSP frame-ancestors does not restrict framing (CSP: "
+        "'(absent)') and X-Frame-Options is absent/invalid ('')."
+    )
+    assert _extract_severity_from_message(high_longrepr) == "HIGH"
+    # The MEDIUM-floor message (legacy X-Frame-Options present, no inline keyword)
+    # carries no severity keyword, so it falls through to the override map (MEDIUM).
+    medium_longrepr = (
+        "Failed: CSP frame-ancestors does not restrict framing (CSP: "
+        "'(absent)'); the app relies on legacy X-Frame-Options ('DENY')."
+    )
+    assert _extract_severity_from_message(medium_longrepr) is None
+
+
+def test_pytest_finding_override_resolves_through_parametrize_suffix():
+    """A parametrized probe (e.g. the per-endpoint TRACE matrix) must still resolve
+    its per-test-name category/severity override; the [param] suffix is stripped
+    before the override-map lookup. Without this a parametrized HIGH/MEDIUM probe
+    would silently fall back to the file stem (api_surface) and miscategorise.
+    """
+    pytest_data = {
+        "tests": [
+            {
+                "nodeid": (
+                    "tests/test_api_surface.py::TestTraceMethod::"
+                    "test_trace_method_is_rejected[<root>]"
+                ),
+                "outcome": "failed",
+                "call": {"longrepr": "Failed: TRACE https://x/ returned 200 ..."},
+            }
+        ]
+    }
+
+    findings = build_pytest_findings(pytest_data, {}, {}, {})
+
+    assert len(findings) == 1
+    assert findings[0]["category"] == "method_hardening"
+    assert findings[0]["severity"] == "MEDIUM"
+    assert findings[0]["id"].startswith("METH-")
 
 
 def test_coverage_matrix_excludes_provider_categories():

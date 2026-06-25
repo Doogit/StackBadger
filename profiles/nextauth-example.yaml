@@ -34,6 +34,17 @@ endpoints:
   authenticated:
     - path: /api/user/profile
       method: GET
+    # The anti-CSRF probe (test_api_surface.py) forges a cross-site state change,
+    # so it only targets a STATE-CHANGING endpoint. It auto-selects the first
+    # authenticated endpoint with a mutating method (POST/PUT/PATCH/DELETE) and a
+    # probe_body; mark the write surface with `state_changing: true` when the
+    # heuristic would pick the wrong route (e.g. a search declared POST). It skips
+    # when none is declared rather than forging the GET read above.
+    - path: /api/user/settings
+      method: POST
+      state_changing: true
+      probe_body:
+        display_name: "pentest-csrf-probe"
 
 test_accounts:
   user_a:

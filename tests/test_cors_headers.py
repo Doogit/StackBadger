@@ -6,6 +6,8 @@ Validates:
   - Security headers on the main page (CSP, X-Frame-Options, HSTS, etc.).
     NOTE: These are KNOWN gaps — tests are expected to fail in the current
     deployment. Failures document the missing controls.
+  - CSP frame-ancestors restricts framing (ASVS V3.4.6, CWE-1021; the modern
+    clickjacking control ASVS 5.0 prefers over legacy X-Frame-Options).
   - Clerk session cookie flags: Secure, HttpOnly, SameSite.
 
 These tests are stack-agnostic — no special marker required.
@@ -29,7 +31,7 @@ if str(_PKG_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_PKG_ROOT))
 
 from profile import load_profile, resolve_profile_path  # noqa: E402
-from helpers import FakeResponse, cache_control_is_safe, netlify_url  # noqa: E402
+from helpers import EVIL_ORIGIN, FakeResponse, cache_control_is_safe, netlify_url  # noqa: E402
 from conftest import first_endpoint, probe_body_for  # noqa: E402
 
 
@@ -51,6 +53,82 @@ _PROFILE = _collection_profile()
 def _get_acao(response: httpx.Response) -> str | None:
     """Return the Access-Control-Allow-Origin header value, or None."""
     return response.headers.get("access-control-allow-origin")
+
+
+def _is_permissive_frame_ancestor_source(token: str) -> bool:
+    """Return True when a frame-ancestors source permits framing by any host.
+
+    Permissive forms (a real browser lets any origin frame the page):
+      - a bare ``*`` wildcard;
+      - a scheme-only source (``https:``/``http:``/``ws:``/``wss:``/``data:``);
+      - any source whose HOST component is a lone ``*`` after stripping the scheme
+        (or scheme-relative ``//``) and an optional ``:port`` (or ``:*``), e.g.
+        ``https://*``, ``//*``, ``*:*``, ``http://*:80``.
+
+    A subdomain wildcard like ``https://*.example.com`` keeps a non-``*`` host, so
+    it is an allowlist (restrictive), not "allow any".
+    """
+    t = token.strip().lower()
+    if not t:
+        return False
+    if t == "*":
+        return True
+    # Scheme-only source (no host part): "https:", "data:", ...
+    if t.endswith(":") and "//" not in t:
+        return True
+    host = t.split("//", 1)[1] if "//" in t else t
+    host = host.split("/", 1)[0]   # drop any path (sources have none, be safe)
+    host = host.split(":", 1)[0]   # drop any :port or :*
+    return host == "*"
+
+
+def _split_csp_policies(csp: str) -> list[str]:
+    """Split a CSP header value into individual policies.
+
+    Multiple ``Content-Security-Policy`` response headers are merged by httpx into
+    one comma-joined value, and each comma-separated segment is a separate policy
+    enforced independently. Commas do not otherwise appear inside a single policy's
+    directives or source expressions, so splitting on ``,`` is safe.
+    """
+    return [seg.strip() for seg in csp.split(",") if seg.strip()]
+
+
+def _frame_ancestors_directive(policy: str) -> str | None:
+    """Return the ``frame-ancestors`` source-list (lowercased) from ONE CSP policy.
+
+    Returns the source-list that follows ``frame-ancestors`` (e.g. ``"'none'"``,
+    ``"'self' https://a.example"``) lowercased, ``None`` when the directive is
+    absent, or an empty string for a present-but-valueless directive. When a policy
+    repeats the directive the first occurrence wins (per the CSP spec). Operates on
+    a SINGLE policy; for a possibly comma-merged header use
+    :func:`_frame_ancestors_is_restrictive`.
+    """
+    for directive in policy.split(";"):
+        parts = directive.split(maxsplit=1)
+        if parts and parts[0].lower() == "frame-ancestors":
+            return parts[1].strip().lower() if len(parts) > 1 else ""
+    return None
+
+
+def _frame_ancestors_is_restrictive(csp: str) -> bool:
+    """Return True when the CSP actively restricts who may frame the page.
+
+    Each policy is enforced independently, so framing is blocked if ANY policy
+    carries a restrictive ``frame-ancestors`` directive (most-restrictive-wins).
+    A policy's ``frame-ancestors`` is restrictive when its source-list is non-empty
+    and contains no permissive source (see
+    :func:`_is_permissive_frame_ancestor_source`); ``'none'``, ``'self'``, and
+    explicit-origin or subdomain-wildcard allowlists all qualify. A
+    missing/valueless directive, or any source that permits framing by any host, is
+    not restrictive.
+    """
+    for policy in _split_csp_policies(csp):
+        value = _frame_ancestors_directive(policy)
+        if value and not any(
+            _is_permissive_frame_ancestor_source(tok) for tok in value.split()
+        ):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +161,9 @@ def _build_cors_paths(profile) -> list[str]:
 
 _NETLIFY_CORS_PATHS = _build_cors_paths(_PROFILE)
 
-_EVIL_ORIGIN = "https://evil.com"
+# Canonical attacker origin (single source in helpers); kept under the local
+# name so the existing CORS-reflection tests below are unchanged.
+_EVIL_ORIGIN = EVIL_ORIGIN
 
 # The allowed origin — derived from profile.target.base_url at collection time.
 _ALLOWED_ORIGIN: str = (
@@ -256,6 +336,68 @@ class TestSecurityHeaders:
         assert xfo in ("DENY", "SAMEORIGIN"), (
             f"X-Frame-Options is {xfo!r}. Expected DENY or SAMEORIGIN. "
             "Add X-Frame-Options: DENY in netlify.toml [[headers]] for /*."
+        )
+
+    @pytest.mark.asvs("3.4.6")
+    @pytest.mark.cwe("1021")
+    def test_csp_frame_ancestors_restricts_framing(self, main_page_response, evidence):
+        """CSP frame-ancestors must restrict who can frame the app (ASVS V3.4.6).
+
+        ASVS 5.0 V3.4.6 prefers the CSP ``frame-ancestors`` directive over the
+        legacy ``X-Frame-Options`` header: modern browsers honor frame-ancestors,
+        it expresses an allowlist X-Frame-Options cannot, and some embedding
+        contexts ignore X-Frame-Options entirely. A restrictive directive is
+        ``frame-ancestors 'none'`` (no framing) or ``'self'`` (same-origin only),
+        or an explicit origin allowlist.
+
+        Severity is graded by the legacy fallback:
+          - frame-ancestors restrictive → pass.
+          - frame-ancestors missing/permissive but X-Frame-Options is
+            DENY/SAMEORIGIN → MEDIUM modernization gap (clickjacking still
+            blocked by the legacy header on browsers that honor it).
+          - both missing → HIGH: the page is framable by any origin (clickjacking,
+            CWE-1021); self-escalated via the inline ``HIGH:`` keyword.
+        """
+        resp = main_page_response
+        csp = resp.headers.get("content-security-policy", "")
+        xfo = resp.headers.get("x-frame-options", "").upper()
+
+        if _frame_ancestors_is_restrictive(csp):
+            return
+
+        # Show the raw CSP (truncated) rather than a single parsed directive: a
+        # comma-merged multi-header CSP has more than one policy, so no single
+        # directive value represents it.
+        csp_display = (csp.strip() or "(absent)")[:200]
+        legacy_ok = xfo in ("DENY", "SAMEORIGIN")
+
+        evidence.capture(
+            FakeResponse(
+                resp.status_code,
+                str(resp.request.url),
+                f"[headers] CSP={csp_display!r}; X-Frame-Options={xfo!r}",
+            ),
+            label="missing_frame_ancestors",
+        )
+
+        # Remediation names netlify.toml as one example among hosts (stack-agnostic).
+        _fix = (
+            "Add Content-Security-Policy: frame-ancestors 'none' (or 'self') in "
+            "your platform's response-header config (netlify.toml [[headers]], "
+            "vercel.json, or your CDN/edge config)"
+        )
+        if legacy_ok:
+            pytest.fail(
+                f"CSP frame-ancestors does not restrict framing (CSP: "
+                f"{csp_display!r}); the app relies on legacy X-Frame-Options "
+                f"({xfo!r}). ASVS V3.4.6 prefers CSP frame-ancestors. {_fix}, "
+                "keeping X-Frame-Options as a fallback (CWE-1021)."
+            )
+        pytest.fail(
+            f"HIGH: CSP frame-ancestors does not restrict framing (CSP: "
+            f"{csp_display!r}) and X-Frame-Options is absent/invalid ({xfo!r}). The "
+            f"page can be framed by any origin and is exposed to clickjacking. "
+            f"{_fix} (ASVS V3.4.6, CWE-1021)."
         )
 
     def test_strict_transport_security_present(self, main_page_response, evidence):
@@ -456,3 +598,65 @@ class TestAuthenticatedResponseCaching:
             "and PII are not written to shared or browser caches "
             "(ASVS V14.3.2, CWE-524)."
         )
+
+
+# ---------------------------------------------------------------------------
+# Offline unit tests: CSP frame-ancestors parsing (no profile, no network)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "policy,expected",
+    [
+        ("default-src 'self'; frame-ancestors 'none'", "'none'"),
+        ("frame-ancestors 'self' https://a.example", "'self' https://a.example"),
+        # Case-insensitive directive name; value lowercased.
+        ("Frame-Ancestors 'SELF'", "'self'"),
+        # Present but valueless -> empty string (distinct from absent/None).
+        ("script-src 'self'; frame-ancestors", ""),
+        # Absent -> None.
+        ("script-src 'self'", None),
+        ("", None),
+        # A similarly-named directive must NOT match frame-ancestors.
+        ("frame-ancestors-foo 'self'", None),
+        # Repeated directive in one policy: first occurrence wins (CSP spec).
+        ("frame-ancestors 'none'; frame-ancestors *", "'none'"),
+    ],
+)
+def test_frame_ancestors_directive(policy, expected):
+    assert _frame_ancestors_directive(policy) == expected
+
+
+@pytest.mark.parametrize(
+    "csp,restrictive",
+    [
+        ("frame-ancestors 'none'", True),
+        ("frame-ancestors 'self'", True),
+        ("frame-ancestors 'self' https://a.example", True),
+        # A subdomain-wildcard source is an allowlist, not "allow any".
+        ("frame-ancestors https://*.example.com", True),
+        # A bare * wildcard is permissive.
+        ("frame-ancestors *", False),
+        ("frame-ancestors 'self' *", False),
+        # Scheme-only and scheme+bare-host wildcard sources permit any host.
+        ("frame-ancestors https:", False),
+        ("frame-ancestors 'self' https://*", False),
+        # Port-wildcard and scheme-relative bare-host wildcards also permit any host.
+        ("frame-ancestors *:*", False),
+        ("frame-ancestors //*", False),
+        ("frame-ancestors http://*:80", False),
+        # Comma-merged multi-header CSP: a restrictive policy in EITHER position
+        # blocks framing (most-restrictive-wins).
+        ("frame-ancestors 'none', default-src *", True),
+        ("default-src 'self', frame-ancestors 'none'", True),
+        # Comma-merged but no frame-ancestors in any policy.
+        ("default-src *, script-src 'self'", False),
+        # Repeated directive, first-wins keeps it restrictive.
+        ("frame-ancestors 'none'; frame-ancestors *", True),
+        # Valueless / absent are not restrictive.
+        ("frame-ancestors", False),
+        ("default-src 'self'", False),
+        ("", False),
+    ],
+)
+def test_frame_ancestors_is_restrictive(csp, restrictive):
+    assert _frame_ancestors_is_restrictive(csp) is restrictive
