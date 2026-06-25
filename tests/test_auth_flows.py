@@ -563,6 +563,59 @@ def _send_signin(url: str, **send_kwargs) -> tuple[int, str]:
     return resp.status_code, safe_text(resp)
 
 
+# Standard Auth.js endpoint paths (mirrors the auth/nextauth.py adapter
+# defaults); a profile may override them in its ``nextauth`` block.
+_NEXTAUTH_DEFAULT_CSRF_PATH = "/api/auth/csrf"
+_NEXTAUTH_DEFAULT_CALLBACK_PATH = "/api/auth/callback/credentials"
+
+
+def _nextauth_signin_attempt(
+    base_url: str, csrf_path: str, callback_path: str, email: str, password: str
+) -> tuple[int, str]:
+    """Run the Auth.js credentials sign-in flow and return (status, body).
+
+    Auth.js gates the credentials callback behind a CSRF token, so a bare POST of
+    email/password never reaches the provider's authorize() callback and would
+    compare two identical CSRF failures (a misleading "safe"). This mirrors the
+    repo's NextAuth adapter (auth/nextauth.py): GET the csrf endpoint for a token
+    (the same client stores the csrf cookie), then POST the callback with
+    csrfToken, callbackUrl, the credentials, and json=true so the response is a
+    JSON body rather than a redirect. Field names default to email/password (the
+    adapter's fallback); a custom-field app would need form-field discovery. A
+    transport failure or a missing csrf token yields a transport sentinel so
+    _enumeration_outcome treats the attempt as inconclusive rather than erroring.
+    """
+    base = base_url.rstrip("/")
+    try:
+        with httpx.Client(
+            timeout=15.0, max_redirects=5, follow_redirects=True
+        ) as client:
+            csrf = client.get(f"{base}{csrf_path}", timeout=10.0)
+            token = ""
+            if csrf.status_code == 200:
+                try:
+                    token = (csrf.json() or {}).get("csrfToken", "")
+                except Exception:  # noqa: BLE001
+                    token = ""
+            if not token:
+                return -1, "<no csrf token; the credentials callback is unreachable>"
+            resp = client.post(
+                f"{base}{callback_path}",
+                data={
+                    "csrfToken": token,
+                    "callbackUrl": base,
+                    "email": email,
+                    "password": password,
+                    "json": "true",
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=15.0,
+            )
+            return resp.status_code, safe_text(resp)
+    except httpx.HTTPError as exc:  # noqa: BLE001
+        return -1, f"<transport error: {type(exc).__name__}>"
+
+
 # ---------------------------------------------------------------------------
 # Test 5: Registration-time weak-password rejection (ASVS 6.2.2, CWE-521)
 # ---------------------------------------------------------------------------
@@ -851,26 +904,30 @@ def test_signin_response_is_enumeration_safe(profile, evidence):
             )
 
     elif provider == "nextauth":
-        # NextAuth signs in through an app-mounted Auth.js handler. Probe it only
-        # when the profile declares the signin path; otherwise it is not derivable.
-        signin_path = (profile.nextauth and profile.nextauth.signin_path) or ""
+        # Auth.js signs in through a CSRF-protected credentials callback, not a
+        # bare POST. Run the csrf then callback flow (mirrors auth/nextauth.py) so
+        # each attempt actually reaches the provider's authorize() callback; a
+        # bare email/password POST would be rejected for a missing CSRF token, so
+        # both legs would fail identically and report a false "safe".
         base_url = (profile.target and profile.target.base_url) or ""
-        if not signin_path or not base_url:
+        if not base_url:
             pytest.skip(
-                "nextauth: profile.nextauth.signin_path (and target.base_url) is "
-                "required to derive the app sign-in endpoint; not configured, so "
-                "the enumeration-safety check is not observable for this stack"
+                "nextauth: profile.target.base_url is required to derive the "
+                "Auth.js credentials sign-in flow"
             )
-        url = base_url.rstrip("/") + "/" + signin_path.lstrip("/")
+        nextauth_cfg = profile.nextauth or None
+        csrf_path = (
+            (nextauth_cfg and getattr(nextauth_cfg, "csrf_path", None))
+            or _NEXTAUTH_DEFAULT_CSRF_PATH
+        )
+        callback_path = (
+            (nextauth_cfg and getattr(nextauth_cfg, "callback_path", None))
+            or _NEXTAUTH_DEFAULT_CALLBACK_PATH
+        )
 
         def _attempt(email: str) -> tuple[int, str]:
-            # Auth.js credentials callback consumes form-encoded fields.
-            return _send_signin(
-                url,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-                content=urlencode(
-                    {"email": email, "password": wrong_password}
-                ).encode(),
+            return _nextauth_signin_attempt(
+                base_url, csrf_path, callback_path, email, wrong_password
             )
 
     else:

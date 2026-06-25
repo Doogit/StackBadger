@@ -104,6 +104,12 @@ uploads:
   endpoint: /import-csv
   format: csv
   valid_fixture: fixtures/records.csv   # Representative well-formed CSV upload.
+  # served_sample_url: a public/retrievable URL of an ALREADY-STORED user upload
+  # (an object-storage public URL or an app download route). Enables the
+  # serve-time Content-Disposition + nosniff probe (ASVS 5.4.1, CWE-434); the
+  # probe skips when this is unset. Leave it commented on placeholder-host
+  # example profiles; set it on a real target to exercise the probe.
+  # served_sample_url: "https://your-bucket.example.com/uploads/sample.csv"
 
 features:
   anon_sessions: true
