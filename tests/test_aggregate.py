@@ -30,6 +30,7 @@ from reports.aggregate import (
     TEST_CATEGORY_MAP,
     TEST_SEVERITY_MAP,
     build_evidence_findings,
+    build_pytest_findings,
     failed_test_names,
     load_evidence,
     render_html,
@@ -335,6 +336,33 @@ def test_inline_high_escalation_from_frame_ancestors_pytest_fail():
         "'(absent)'); the app relies on legacy X-Frame-Options ('DENY')."
     )
     assert _extract_severity_from_message(medium_longrepr) is None
+
+
+def test_pytest_finding_override_resolves_through_parametrize_suffix():
+    """A parametrized probe (e.g. the per-endpoint TRACE matrix) must still resolve
+    its per-test-name category/severity override; the [param] suffix is stripped
+    before the override-map lookup. Without this a parametrized HIGH/MEDIUM probe
+    would silently fall back to the file stem (api_surface) and miscategorise.
+    """
+    pytest_data = {
+        "tests": [
+            {
+                "nodeid": (
+                    "tests/test_api_surface.py::TestTraceMethod::"
+                    "test_trace_method_is_rejected[<root>]"
+                ),
+                "outcome": "failed",
+                "call": {"longrepr": "Failed: TRACE https://x/ returned 200 ..."},
+            }
+        ]
+    }
+
+    findings = build_pytest_findings(pytest_data, {}, {}, {})
+
+    assert len(findings) == 1
+    assert findings[0]["category"] == "method_hardening"
+    assert findings[0]["severity"] == "MEDIUM"
+    assert findings[0]["id"].startswith("METH-")
 
 
 def test_coverage_matrix_excludes_provider_categories():

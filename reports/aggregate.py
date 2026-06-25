@@ -932,6 +932,11 @@ def build_pytest_findings(
         node_id: str = test.get("nodeid", "")
         stem = _test_stem_from_nodeid(node_id)
         test_func = node_id.split("::")[-1] if "::" in node_id else ""
+        # Strip the parametrize suffix ("test_foo[case]" -> "test_foo") for the
+        # per-test-name override lookups, so a parametrized probe still matches its
+        # bare-name entry instead of silently falling back to the file-stem
+        # category/severity (which would downgrade a HIGH finding).
+        test_func_base = test_func.split("[", 1)[0]
 
         # Extract error message from pytest report (needed before severity resolution)
         call_info = test.get("call", {}) or {}
@@ -947,11 +952,11 @@ def build_pytest_findings(
         longrepr_severity = _extract_severity_from_message(longrepr) if longrepr else None
         severity = (
             longrepr_severity
-            or _TEST_NAME_SEVERITY_OVERRIDES.get(test_func)
+            or _TEST_NAME_SEVERITY_OVERRIDES.get(test_func_base)
             or TEST_SEVERITY_MAP.get(stem, "MEDIUM")
         )
         category = (
-            _TEST_NAME_CATEGORY_OVERRIDES.get(test_func)
+            _TEST_NAME_CATEGORY_OVERRIDES.get(test_func_base)
             or TEST_CATEGORY_MAP.get(stem, "api_surface")
         )
         endpoint, method = _endpoint_from_nodeid(node_id, source_file_map)

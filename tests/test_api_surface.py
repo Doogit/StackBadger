@@ -37,7 +37,7 @@ if str(_PKG_ROOT) not in _sys.path:
 
 from profile import load_profile, resolve_profile_path  # noqa: E402
 from helpers import EVIL_ORIGIN, FakeResponse, netlify_url, safe_text, send_request  # noqa: E402
-from conftest import first_endpoint, probe_body_for  # noqa: E402
+from conftest import endpoints_for_category, first_endpoint, probe_body_for  # noqa: E402
 
 
 def _collection_profile():
@@ -190,6 +190,30 @@ _POST_ONLY_PATHS = _build_post_only_paths(_PROFILE)
 _DISALLOWED_METHODS = ["GET", "PUT", "DELETE"]
 
 
+def _build_browser_facing_paths(profile) -> list[str]:
+    """Return declared browser-facing endpoint paths (authenticated/anonymous/
+    payment). Webhook and internal endpoints are server-to-server, so they are
+    excluded. Returns empty list when profile is None."""
+    if profile is None or not profile.endpoints:
+        return []
+    paths: list[str] = []
+    for group in ("authenticated", "anonymous", "payment"):
+        eps = getattr(profile.endpoints, group, None)
+        if not eps:
+            continue
+        for ep in eps:
+            path = getattr(ep, "path", "")
+            if path:
+                paths.append(path.lstrip("/"))
+    return paths
+
+
+# TRACE is host/route-level: verb handling can differ between the origin root and
+# API/function routes, so probe the root ("") AND every declared browser-facing
+# endpoint. Deduplicated, root first.
+_TRACE_PATHS = list(dict.fromkeys([""] + _build_browser_facing_paths(_PROFILE)))
+
+
 class TestMethodEnforcement:
     """POST-only endpoints must reject non-POST verbs with 405."""
 
@@ -252,16 +276,18 @@ class TestTraceMethod:
     server/method configuration and can leak request data through other vectors,
     so ASVS V13.4.4 requires it be disabled.
 
-    Host-derived: TRACE handling is a server/CDN/function-gateway concern, not a
-    per-route one, so this probes the application origin once rather than every
-    endpoint. Skips cleanly on placeholder-host example profiles via the
-    ``profile`` fixture.
+    TRACE handling can differ between the origin root and API/function routes
+    (serverless/framework stacks often route them through different handlers), so
+    this extends the method matrix: it probes the origin root AND every declared
+    browser-facing endpoint (``_TRACE_PATHS``), failing if any honors TRACE. Skips
+    cleanly on placeholder-host example profiles via the ``profile`` fixture.
     """
 
     @pytest.mark.asvs("13.4.4")
     @pytest.mark.cwe("650")
-    def test_trace_method_is_rejected(self, profile, evidence):
-        """Send TRACE to the application origin; a 200 means TRACE is honored.
+    @pytest.mark.parametrize("path", _TRACE_PATHS, ids=lambda p: p or "<root>")
+    def test_trace_method_is_rejected(self, profile, path, evidence):
+        """Send TRACE to a target ("" = origin root); a 200 means TRACE is honored.
 
         A correctly configured server rejects TRACE (405 Method Not Allowed, 501
         Not Implemented, or 403). A 200, especially one that echoes the request
@@ -270,13 +296,13 @@ class TestTraceMethod:
         base_url = (profile.target and profile.target.base_url) or ""
         if not base_url:
             pytest.skip("Profile declares no target.base_url for the TRACE probe")
-        url = base_url.rstrip("/") + "/"
+        url = base_url.rstrip("/") + "/" if path == "" else netlify_url(profile, path)
 
         try:
             resp = send_request("TRACE", url, timeout=10.0)
         except httpx.TransportError as exc:
             pytest.skip(
-                f"Application origin unreachable for TRACE probe "
+                f"TRACE target {url} unreachable "
                 f"({type(exc).__name__}: {exc})"
             )
 
@@ -329,6 +355,43 @@ def _strip_csrf_cookies(cookie_header: str) -> str:
             continue
         kept.append(pair)
     return "; ".join(kept)
+
+
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _select_csrf_endpoint(endpoints: list[dict]) -> dict | None:
+    """Pure selection of a STATE-CHANGING endpoint from a list of dicts, or None.
+
+    CSRF (CWE-352) is about state-changing requests, so a read route must never be
+    selected (forging a GET read proves nothing and would misclassify a
+    session-required read as a finding). Preference order:
+      1. The first endpoint explicitly flagged ``state_changing: true``. This is
+         the authoritative seam: it lets a profile mark the true write surface the
+         heuristic cannot infer (a search declared POST that is really a read, or a
+         bodyless mutation the heuristic skips).
+      2. Else the first endpoint with a mutating method (POST/PUT/PATCH/DELETE) AND
+         a non-empty ``probe_body`` (a write that carries a payload). A bare GET
+         read is never selected.
+    """
+    for ep in endpoints:
+        if ep.get("state_changing") and ep.get("path"):
+            return ep
+    for ep in endpoints:
+        method = (ep.get("method") or "POST").upper()
+        if method in _MUTATING_METHODS and probe_body_for(ep) and ep.get("path"):
+            return ep
+    return None
+
+
+def _csrf_target_endpoint(profile) -> dict | None:
+    """Return the authenticated endpoint to probe for CSRF, or None.
+
+    Thin profile-bound wrapper over :func:`_select_csrf_endpoint`. Returns ``None``
+    when no state-changing authenticated endpoint is declared; the caller then
+    skips rather than forging a read.
+    """
+    return _select_csrf_endpoint(endpoints_for_category(profile, "authenticated"))
 
 
 # Status codes that indicate the server DELIBERATELY refused the cross-site,
@@ -408,10 +471,13 @@ class TestCSRFProtection:
         The failure message says so; confirm the session cookie's ``SameSite`` flag
         before treating a finding as exploitable. The probe targets the
         server-side origin/token check specifically.
-      - Read endpoints: the first ``authenticated`` endpoint may be a read declared
-        POST. CSRF on a pure read is not a vulnerability, but black-box the probe
-        cannot tell a 2xx read from a 2xx state change, so an operator should
-        confirm the endpoint actually mutates before acting on a finding.
+      - Endpoint selection: the probe targets a STATE-CHANGING authenticated
+        endpoint (see :func:`_csrf_target_endpoint`), preferring one flagged
+        ``state_changing: true`` and otherwise a mutating method with a
+        ``probe_body``, and skips when none is declared rather than forging a read.
+        The heuristic can still pick a POST that is really a read (e.g. a search),
+        so mark the true write surface with ``state_changing: true`` for a target
+        whose first mutating endpoint is not a genuine state change.
 
     Safety: this MUTATES. It sends up to three real requests to the endpoint (the
     legitimate control, the cookie-bearing forgery, and the cookieless control), so
@@ -441,7 +507,14 @@ class TestCSRFProtection:
                 "NextAuth) to exercise it."
             )
 
-        endpoint = first_endpoint(profile, "authenticated")
+        endpoint = _csrf_target_endpoint(profile)
+        if endpoint is None:
+            pytest.skip(
+                "No state-changing authenticated endpoint to forge. CSRF (CWE-352) "
+                "only applies to state changes, so a read route is never probed. "
+                "Declare a POST/PUT/PATCH/DELETE authenticated endpoint with a "
+                "probe_body, or mark the write route with `state_changing: true`."
+            )
         path = endpoint["path"]
         method = (endpoint.get("method") or "POST").upper()
         body = probe_body_for(endpoint)
@@ -734,6 +807,47 @@ def test_strip_csrf_cookies(cookie_header, expected):
 )
 def test_csrf_forgery_outcome(forged, cookieless, expected):
     assert _csrf_forgery_outcome(forged, cookieless) == expected
+
+
+@pytest.mark.parametrize(
+    "endpoints,expected_path",
+    [
+        # No endpoints, or only a GET read -> nothing to forge.
+        ([], None),
+        ([{"path": "/api/user/profile", "method": "GET"}], None),
+        # A mutating method with no body is not selected (heuristic needs a body).
+        ([{"path": "/p", "method": "POST"}], None),
+        # Mutating method + non-empty probe_body -> selected.
+        ([{"path": "/w", "method": "POST", "probe_body": {"x": 1}}], "/w"),
+        # Missing method defaults to POST, so a body-carrying write is selected.
+        ([{"path": "/p", "probe_body": {"x": 1}}], "/p"),
+        ([{"path": "/d", "method": "DELETE", "probe_body": {"id": 1}}], "/d"),
+        # A GET read before a write: skip the read, select the write.
+        (
+            [
+                {"path": "/api/user/profile", "method": "GET"},
+                {"path": "/w", "method": "POST", "probe_body": {"x": 1}},
+            ],
+            "/w",
+        ),
+        # Explicit flag is authoritative: selected even when declared GET.
+        ([{"path": "/read", "method": "GET", "state_changing": True}], "/read"),
+        # Flag is preferred over the heuristic, even when the flagged route is
+        # bodyless and appears after a heuristic match.
+        (
+            [
+                {"path": "/w", "method": "POST", "probe_body": {"x": 1}},
+                {"path": "/flagged", "method": "PATCH", "state_changing": True},
+            ],
+            "/flagged",
+        ),
+        # A flagged endpoint with no path is ignored (falls through to heuristic).
+        ([{"method": "POST", "state_changing": True}], None),
+    ],
+)
+def test_select_csrf_endpoint(endpoints, expected_path):
+    selected = _select_csrf_endpoint(endpoints)
+    assert (selected or {}).get("path") == expected_path
 
 
 def test_send_request_dispatches_nonstandard_verb_trace(monkeypatch):
