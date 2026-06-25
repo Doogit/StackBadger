@@ -101,6 +101,16 @@ _TEST_NAME_SEVERITY_OVERRIDES: dict[str, str] = {
     # are MEDIUM; the file-stem default (HIGH) covers token leakage / state / PKCE.
     "test_oauth_requests_minimal_scopes": "MEDIUM",
     "test_oauth_oidc_emits_nonce": "MEDIUM",
+    # Phase-2 §P2-B/§P2-E probes extend existing modules, so their severity is
+    # pinned at the test-function level (independent of the host file's stem),
+    # mirroring the cache-control entry above. TRACE/method-hardening is MEDIUM (and
+    # would default MEDIUM from the api_surface stem regardless); cookie-authed
+    # CSRF is HIGH (acting as the victim); frame-ancestors is a MEDIUM floor in
+    # test_cors_headers.py (LOW stem) and self-escalates to HIGH inline when the
+    # page is framable by any origin (no X-Frame-Options fallback).
+    "test_trace_method_is_rejected": "MEDIUM",
+    "test_state_change_requires_anti_csrf_token": "HIGH",
+    "test_csp_frame_ancestors_restricts_framing": "MEDIUM",
 }
 
 # Per-test category overrides (test function name → category).
@@ -118,6 +128,12 @@ _TEST_NAME_CATEGORY_OVERRIDES: dict[str, str] = {
     "test_event_type_spoofing_bypass": "webhook_spoofing",
     # Parse-order probes (JSON deserialised before HMAC gate)
     "test_json_parsing_before_verification": "webhook_parse_order",
+    # Phase-2 §P2-B/§P2-E probes extend existing modules (test_api_surface.py /
+    # test_cors_headers.py); route each to its own ASVS category so the finding
+    # is not filed under the host module's default (api_surface / cors_headers).
+    "test_trace_method_is_rejected": "method_hardening",
+    "test_state_change_requires_anti_csrf_token": "csrf",
+    "test_csp_frame_ancestors_restricts_framing": "frame_ancestors",
 }
 
 _STANDALONE_FINDING_CATEGORY_OVERRIDES: dict[str, str] = {
@@ -214,6 +230,9 @@ _CATEGORY_PREFIXES: dict[str, str] = {
     "data_protection": "DATAP",
     "oauth": "OAUTH",
     "mass_assignment": "MASS",
+    "method_hardening": "METH",
+    "csrf": "CSRF",
+    "frame_ancestors": "FRAME",
 }
 
 # Provider layer categories (direct-API tests, not app endpoints)
@@ -533,6 +552,30 @@ def _remediation_for_category(category: str, severity: str, stack_info: dict) ->
             "request carries the appropriate custom claim. Strip or reject unknown "
             "keys at the API boundary."
         ),
+        "method_hardening": (
+            "Disable the HTTP TRACE (and TRACK) method at the web server, CDN, or "
+            "function gateway. Allow only the methods each route needs (typically "
+            "GET/POST/PUT/PATCH/DELETE/OPTIONS) and return 405 Method Not Allowed "
+            "for everything else, so the method surface cannot be abused for "
+            "Cross-Site Tracing or unexpected-verb handling."
+        ),
+        "csrf": (
+            "Protect every state-changing, cookie-authenticated endpoint with an "
+            "anti-CSRF token (synchronizer or double-submit) that the server "
+            "validates, and reject requests whose Origin/Referer is not same-site. "
+            "Set session cookies SameSite=Lax or Strict so the browser does not "
+            "attach them to cross-site requests. Where practical, prefer a "
+            "non-ambient credential (Authorization: Bearer) for API calls, which "
+            "is not auto-sent cross-origin."
+        ),
+        "frame_ancestors": (
+            "Add a Content-Security-Policy with a restrictive frame-ancestors "
+            "directive: frame-ancestors 'none' to forbid framing, or 'self' to "
+            "allow same-origin only. Keep X-Frame-Options: DENY/SAMEORIGIN as a "
+            "fallback for older browsers. Header defaults differ per host "
+            "(Netlify/Vercel/Cloudflare); set the CSP explicitly in your platform "
+            "config rather than relying on the host default."
+        ),
         "zap": (
             "Review the flagged endpoint and apply the remediation recommended by the ZAP alert. "
             "Consult OWASP guidance for the specific vulnerability class."
@@ -581,6 +624,9 @@ def _root_cause_for_category(category: str) -> str:
         "data_protection": "Sensitive responses are cacheable (missing Cache-Control: no-store) or tokens/PII are exposed in URLs, query strings, or redirect Location headers.",
         "oauth": "OAuth client flow omits a CSRF state, PKCE code_challenge, or OIDC nonce, requests excessive scopes, or serialises delegated-send tokens to the browser instead of holding them server-side.",
         "mass_assignment": "The write handler binds client-supplied fields onto the stored object instead of allow-listing writable columns, so a privileged field (role, is_admin, balance) included in the payload is persisted.",
+        "method_hardening": "The server honors the HTTP TRACE method, echoing the request back to the client (Cross-Site Tracing) and signalling a permissive method configuration.",
+        "csrf": "A state-changing endpoint authenticated by an ambient cookie session does not verify request origin or an anti-CSRF token, so a forged cross-site request carrying the victim's session cookie is accepted.",
+        "frame_ancestors": "The Content-Security-Policy lacks a restrictive frame-ancestors directive, so framing is controlled (if at all) only by the legacy X-Frame-Options header.",
         "zap": "Vulnerability identified by automated ZAP scanner; see alert details.",
         "firebase_auth": "Firebase Auth adapter detected a blocking condition (MFA, App Check).",
         "firestore_rules": "Firestore Security Rules misconfigured — allows unauthorized read/write.",
@@ -698,6 +744,26 @@ def _why_it_matters_for_category(category: str) -> str:
             "own privileges, grant itself paid entitlements, or tamper with "
             "balances directly from a write payload, with no other vulnerability "
             "required."
+        ),
+        "method_hardening": (
+            "An enabled TRACE method can be abused for Cross-Site Tracing: with a "
+            "second flaw it lets an attacker read request headers the browser "
+            "otherwise hides from script (including session cookies), and it marks "
+            "a permissive method surface that may accept other unsafe verbs."
+        ),
+        "csrf": (
+            "Cross-site request forgery lets an attacker's page perform "
+            "state-changing actions as a logged-in victim (change settings, move "
+            "funds, delete data) without stealing the credential, because the "
+            "browser attaches the session cookie automatically to the forged "
+            "request."
+        ),
+        "frame_ancestors": (
+            "Without a restrictive CSP frame-ancestors directive the page can be "
+            "embedded in an attacker-controlled iframe and used for clickjacking, "
+            "overlaying the real UI to trick the user into unintended clicks. "
+            "Browsers honor frame-ancestors over X-Frame-Options, and some "
+            "contexts ignore X-Frame-Options entirely."
         ),
         "zap": (
             "This vulnerability class can be exploited to compromise application "

@@ -31,6 +31,10 @@ USER_A_UPLOAD_ID = "00000000-0000-4000-8000-000000000000"
 # Also used as the canonical "other user" upload ID in IDOR and RLS tests.
 USER_B_UPLOAD_ID = "00000000-0000-4000-8000-000000000001"
 
+# Canonical attacker-controlled cross-site origin used by CORS-reflection and
+# CSRF-forgery probes. A reserved placeholder, not an application-specific name.
+EVIL_ORIGIN = "https://evil.com"
+
 # ---------------------------------------------------------------------------
 # Common secrets
 # ---------------------------------------------------------------------------
@@ -231,7 +235,6 @@ def send_request(
         :class:`httpx.Response`.
     """
     with httpx.Client(timeout=timeout, follow_redirects=follow_redirects) as client:
-        fn = getattr(client, method.lower())
         kwargs: dict = {"headers": headers or {}}
         if params:
             kwargs["params"] = params
@@ -243,7 +246,12 @@ def send_request(
             kwargs["content"] = raw
         if files is not None:
             kwargs["files"] = files
-        return fn(url, **kwargs)
+        # Dispatch via client.request() rather than getattr(client, method.lower()):
+        # httpx.Client exposes only the standard verbs as methods, so a
+        # non-standard verb such as TRACE has no attribute and getattr would raise
+        # AttributeError before any request is built. request() accepts an
+        # arbitrary method string.
+        return client.request(method.upper(), url, **kwargs)
 
 
 # ---------------------------------------------------------------------------
