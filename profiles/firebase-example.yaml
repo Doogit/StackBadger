@@ -29,7 +29,8 @@ firebase:
 
 # NextAuth config (uncomment if stack.auth: nextauth)
 # nextauth:
-#   signin_path: "/api/auth/callback/credentials"  # default
+#   signin_path: "/api/auth/signin"                 # HTML sign-in page (field discovery); default
+#   callback_path: "/api/auth/callback/credentials" # credential POST target; default
 #   session_path: "/api/auth/session"  # default
 
 # AWS S3 config (uncomment if stack.storage: s3)

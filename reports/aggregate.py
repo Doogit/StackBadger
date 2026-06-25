@@ -111,6 +111,15 @@ _TEST_NAME_SEVERITY_OVERRIDES: dict[str, str] = {
     "test_trace_method_is_rejected": "MEDIUM",
     "test_state_change_requires_anti_csrf_token": "HIGH",
     "test_csp_frame_ancestors_restricts_framing": "MEDIUM",
+    # Phase-2 §P2-C/§P2-D probes also extend existing modules (test_file_upload.py
+    # / test_auth_flows.py). Their categories are distinct L2 controls (decompression
+    # DoS, serve-time disposition, registration password policy, sign-in enumeration),
+    # all MEDIUM. The value matches the host stems' MEDIUM default, but it is pinned
+    # at the test-function level so the category routes independently of the stem.
+    "test_upload_zip_bomb_rejected": "MEDIUM",
+    "test_served_upload_sets_content_disposition": "MEDIUM",
+    "test_registration_rejects_weak_password": "MEDIUM",
+    "test_signin_response_is_enumeration_safe": "MEDIUM",
 }
 
 # Per-test category overrides (test function name → category).
@@ -134,6 +143,17 @@ _TEST_NAME_CATEGORY_OVERRIDES: dict[str, str] = {
     "test_trace_method_is_rejected": "method_hardening",
     "test_state_change_requires_anti_csrf_token": "csrf",
     "test_csp_frame_ancestors_restricts_framing": "frame_ancestors",
+    # Phase-2 §P2-C file-handling probes (extend test_api_surface's sibling
+    # test_file_upload.py): decompression DoS and serve-time Content-Disposition are
+    # distinct ASVS controls, so route each to its own category rather than the host
+    # module's default (file_upload).
+    "test_upload_zip_bomb_rejected": "file_dos",
+    "test_served_upload_sets_content_disposition": "file_serve",
+    # Phase-2 §P2-D auth-delta probes (extend test_auth_flows.py): registration
+    # password policy and sign-in user-enumeration are distinct controls, routed to
+    # their own categories instead of the host module's default (auth_flows).
+    "test_registration_rejects_weak_password": "password_policy",
+    "test_signin_response_is_enumeration_safe": "user_enumeration",
 }
 
 _STANDALONE_FINDING_CATEGORY_OVERRIDES: dict[str, str] = {
@@ -233,6 +253,10 @@ _CATEGORY_PREFIXES: dict[str, str] = {
     "method_hardening": "METH",
     "csrf": "CSRF",
     "frame_ancestors": "FRAME",
+    "file_dos": "FDOS",
+    "file_serve": "FSERVE",
+    "password_policy": "PWPOL",
+    "user_enumeration": "ENUM",
 }
 
 # Provider layer categories (direct-API tests, not app endpoints)
@@ -576,6 +600,41 @@ def _remediation_for_category(category: str, severity: str, stack_info: dict) ->
             "(Netlify/Vercel/Cloudflare); set the CSP explicitly in your platform "
             "config rather than relying on the host default."
         ),
+        "file_dos": (
+            "Cap the decompressed size before fully expanding any uploaded "
+            "archive, and abort once the running output exceeds that bound. "
+            "Stream the decompression and count output bytes rather than trusting "
+            "the compressed size, and reject the request (413 or 400) when the cap "
+            "is hit. Reject unexpected compressed content types at the boundary "
+            "when the endpoint only accepts plain CSV."
+        ),
+        "file_serve": (
+            "Serve every user-uploaded file with Content-Disposition: attachment "
+            "so the browser downloads rather than renders it, and add "
+            "X-Content-Type-Options: nosniff so the type cannot be re-sniffed to "
+            "HTML or SVG. Serve uploads from a separate, cookieless origin where "
+            "practical, and set an accurate, non-renderable Content-Type. These "
+            "headers differ per storage backend (Supabase/Firebase/S3/R2), so set "
+            "them explicitly in the bucket or serving config."
+        ),
+        "password_policy": (
+            "Enforce a password policy at the registration endpoint: a minimum "
+            "length (at least 8, ideally 12+) and a check against known-breached "
+            "and dictionary passwords. For Supabase Auth set the minimum password "
+            "length and leaked-password protection in the Auth settings; for "
+            "Firebase enforce strength in the Identity Platform password policy; "
+            "for Clerk configure the password and breach settings in the instance. "
+            "Reject weak passwords with a clear policy message rather than "
+            "accepting them."
+        ),
+        "user_enumeration": (
+            "Return an identical generic error, with the same status code and body "
+            "shape, for both the account-not-found and wrong-password cases (for "
+            "example a single \"invalid login credentials\" response). Do not vary "
+            "status codes, error text, or timing by whether the account exists. "
+            "Apply the same uniform response on password reset and registration so "
+            "existence cannot be inferred there either."
+        ),
         "zap": (
             "Review the flagged endpoint and apply the remediation recommended by the ZAP alert. "
             "Consult OWASP guidance for the specific vulnerability class."
@@ -627,6 +686,10 @@ def _root_cause_for_category(category: str) -> str:
         "method_hardening": "The server honors the HTTP TRACE method, echoing the request back to the client (Cross-Site Tracing) and signalling a permissive method configuration.",
         "csrf": "A state-changing endpoint authenticated by an ambient cookie session does not verify request origin or an anti-CSRF token, so a forged cross-site request carrying the victim's session cookie is accepted.",
         "frame_ancestors": "The Content-Security-Policy lacks a restrictive frame-ancestors directive, so framing is controlled (if at all) only by the legacy X-Frame-Options header.",
+        "file_dos": "The upload handler decompresses a client-supplied compressed file without enforcing a decompressed-size cap, so a small gzip/zip can expand to an enormous payload in server memory.",
+        "file_serve": "User-uploaded files are served without forcing a download, so a stored HTML or SVG is rendered inline in the application's own origin instead of being downloaded as an inert attachment.",
+        "password_policy": "The registration endpoint accepts a password without enforcing a minimum strength or breach check, so a trivially guessable credential is allowed at sign-up.",
+        "user_enumeration": "The sign-in endpoint returns a different response for a non-existent account than for a wrong password, so the response itself reveals whether an email is registered.",
         "zap": "Vulnerability identified by automated ZAP scanner; see alert details.",
         "firebase_auth": "Firebase Auth adapter detected a blocking condition (MFA, App Check).",
         "firestore_rules": "Firestore Security Rules misconfigured — allows unauthorized read/write.",
@@ -764,6 +827,36 @@ def _why_it_matters_for_category(category: str) -> str:
             "overlaying the real UI to trick the user into unintended clicks. "
             "Browsers honor frame-ancestors over X-Frame-Options, and some "
             "contexts ignore X-Frame-Options entirely."
+        ),
+        "file_dos": (
+            "A few-kilobyte upload that decompresses to gigabytes lets a single "
+            "request exhaust the server's memory or CPU, a denial-of-service "
+            "amplification. Because the request body is tiny, naive size limits on "
+            "the upload never trip, and the expansion happens only after the file "
+            "is read."
+        ),
+        "file_serve": (
+            "When a stored file renders inline, any script it contains executes in "
+            "the serving origin's security context (stored XSS on download), which "
+            "can read the victim's session and act as them. SVG and HTML uploads "
+            "are the classic vector, and content-type sniffing can turn a "
+            "benign-looking upload into active content."
+        ),
+        "password_policy": (
+            "A weak password accepted at registration lets users (and attackers "
+            "seeding accounts) create credentials that are trivially brute-forced "
+            "or already exposed in breach corpora. That weakens every downstream "
+            "auth control and makes credential-stuffing and account takeover far "
+            "easier. The provider, not the app, usually owns this policy, so a gap "
+            "here is silent until tested."
+        ),
+        "user_enumeration": (
+            "An attacker can submit one wrong-password attempt per email and read "
+            "the response to learn which addresses have accounts, building a "
+            "validated target list for credential stuffing, phishing, or password "
+            "spraying. This turns a public sign-in form into an account directory. "
+            "The disclosure needs no valid credential, so it is cheap to automate "
+            "at scale."
         ),
         "zap": (
             "This vulnerability class can be exploited to compromise application "

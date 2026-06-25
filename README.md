@@ -417,7 +417,8 @@ firebase:                              # auth: firebase and/or storage/database:
   test_storage_paths: {user_a: "users/uid-a/f.pdf", user_b: "users/uid-b/f.pdf"}
 
 nextauth:                              # auth: nextauth
-  signin_path: "/api/auth/callback/credentials"   # Optional; sensible defaults.
+  signin_path: "/api/auth/signin"                 # HTML sign-in page (credential field-name discovery); default.
+  callback_path: "/api/auth/callback/credentials" # Credential POST target; default.
   session_path: "/api/auth/session"
 
 aws:                                   # storage: s3
@@ -463,6 +464,7 @@ uploads:                               # File-upload abuse probe config.
   endpoint: /import-csv
   format: csv
   valid_fixture: fixtures/records.csv
+  served_sample_url: https://cdn.example.com/uploads/sample.csv   # Optional: a retrievable URL of an already-stored upload; enables the serve-time Content-Disposition + nosniff probe (ASVS 5.4.1, CWE-434). Skips when unset.
 
 sensitive_patterns: ["at Object.", "/var/task/", "SyntaxError"]   # Info-disclosure leak markers.
 custom_headers: {anon_session: "x-anon-session"}
