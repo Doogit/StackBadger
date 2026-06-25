@@ -52,12 +52,14 @@ Scope / safety
   move it out of the test account's RLS scope and orphan it. Cross-tenant
   ownership escalation is covered separately by the cross-user probes in
   ``tests/test_rls_bypass.py`` and ``tests/test_idor.py``.
-- Conservative false-negative (documented, not a bug): the PostgREST variant
-  probes only columns present on the fetched row, and uses an obviously-foreign
-  sentinel. A privileged column that is write-allowed but read-withheld, or one
-  constrained by an enum/CHECK that rejects the foreign sentinel, reads as clean.
-  A green run is therefore evidence the obvious mass-assignment vector is closed,
-  not a proof of full BOPLA safety.
+- Residual limitation (documented, not a bug): the PostgREST variant probes only
+  columns present on the fetched row. Categorical columns are probed with a
+  realistic privileged value (role='admin', plan='enterprise') so an enum/CHECK
+  does not reject the probe outright, and an all-value-rejected outcome is treated
+  as inconclusive (skip), never clean. What still escapes detection is a privileged
+  column that is write-allowed but read-withheld, or a privileged literal this
+  catalogue does not guess (e.g. role='superadmin'). A green run is evidence the
+  obvious mass-assignment vectors are closed, not a proof of full BOPLA safety.
 - On the shipped example profiles the placeholder host short-circuits every live
   request via the ``profile`` fixture, so these skip before any traffic. The
   offline unit tests at the bottom exercise the pure reflection helpers with no
@@ -115,11 +117,19 @@ _TEST_DOC_IDS = (
 # Privileged field catalogues
 # ---------------------------------------------------------------------------
 #
-# Each maps a privileged field NAME to a foreign SENTINEL the client must never
-# be able to assign. Sentinels are deliberately distinctive so a read-back
-# reflection is unambiguous (a legitimate row would not already carry
-# "sb_mass_assign_probe"). Ownership-transfer columns are intentionally absent
-# (see the module docstring "Scope / safety" note).
+# Each maps a privileged field NAME to the value the client must never be able to
+# assign. Two kinds of value are used deliberately:
+#   - Booleans / numerics (is_admin, balance, ...) get an unmistakable sentinel
+#     (True, an implausible balance). These columns have no enum/CHECK domain, so
+#     the sentinel is always accepted-or-denied, never value-rejected.
+#   - Categorical string columns (role, plan, tier) get a REALISTIC privileged
+#     value (admin, enterprise). A foreign literal like "sb_mass_assign_probe"
+#     would be 400-rejected by an enum/CHECK on those columns even on a target
+#     that wrongly allows role='admin', so the probe would miss the canonical
+#     role-escalation case. The PostgREST loop additionally treats an all-4xx
+#     outcome as inconclusive (skip), so a value-rejection never reads as clean.
+# Ownership-transfer columns are intentionally absent (see the module docstring
+# "Scope / safety" note).
 
 # A balance/credit sentinel that is implausible as real data.
 _BALANCE_SENTINEL = 133713371337
@@ -127,17 +137,19 @@ _BALANCE_SENTINEL = 133713371337
 # PostgREST tables conventionally use snake_case columns.
 _POSTGREST_PRIVILEGED_FIELDS: dict[str, object] = {
     "is_admin": True,
-    "role": "sb_mass_assign_probe",
+    "role": "admin",
     "is_verified": True,
     "email_verified": True,
-    "plan": "sb_mass_assign_probe",
-    "subscription_tier": "sb_mass_assign_probe",
+    "plan": "enterprise",
+    "subscription_tier": "enterprise",
     "balance": _BALANCE_SENTINEL,
     "credits": _BALANCE_SENTINEL,
 }
 
-# Firestore documents conventionally use camelCase fields; cover both common
-# spellings so the probe fires regardless of the app's naming convention.
+# Firestore documents are schemaless (no enum/CHECK), so a distinctive foreign
+# sentinel is safe for the string fields and avoids granting a real privileged
+# value. Cover both snake_case and camelCase so the probe fires regardless of the
+# app's naming convention.
 _FIRESTORE_PRIVILEGED_FIELDS: dict[str, object] = {
     "isAdmin": True,
     "is_admin": True,
@@ -314,7 +326,9 @@ def _restore_firestore_doc(client, doc_url, headers, wrote, pre_fields, evidence
 
     Fields that pre-existed are reset to their exact original typed envelope;
     fields the probe introduced are deleted (an empty ``fields`` map under the
-    field's updateMask removes it). Best-effort, never raises.
+    field's updateMask removes it). currentDocument.exists keeps the restore a
+    pure update so it can never re-create a since-deleted document. Best-effort,
+    never raises.
     """
     for field in wrote:
         if field in pre_fields:
@@ -322,7 +336,12 @@ def _restore_firestore_doc(client, doc_url, headers, wrote, pre_fields, evidence
         else:
             body = {"fields": {}}
         try:
-            client.patch(doc_url, json=body, headers=headers, params={"updateMask.fieldPaths": field})
+            client.patch(
+                doc_url,
+                json=body,
+                headers=headers,
+                params={"updateMask.fieldPaths": field, "currentDocument.exists": "true"},
+            )
         except Exception:  # noqa: BLE001
             pass
     evidence.capture(
@@ -350,10 +369,14 @@ def test_postgrest_mass_assignment_own_row(table, profile, user_a_client, eviden
     touched):
       1. GET the user's own row (``?limit=1``) and snapshot it.
       2. Detect which privileged columns from the catalogue already exist on it.
-      3. PATCH those columns with foreign sentinels, one field per request.
-      4. GET the row again (authoritative read-back) and confirm NO sentinel
-         persisted.
+      3. PATCH those columns with a privileged value, one field per request.
+      4. GET the row again (authoritative read-back) and confirm the value did
+         NOT persist.
       5. Best-effort restore the original values.
+
+    If every column write is rejected by value/constraint validation (no 2xx and
+    no 401/403), the result is inconclusive and the probe skips rather than
+    reporting clean.
 
     A persisted sentinel is a CWE-915 / V8.2.3 mass-assignment finding: the write
     handler bound a client-supplied privileged field instead of allow-listing
@@ -402,20 +425,28 @@ def test_postgrest_mass_assignment_own_row(table, profile, user_a_client, eviden
     patch_headers = _authed_headers(profile, user_a_client)
     pkval = own_row[pk]
     persisted: list[str] = []
+    # A write is "conclusive" when PostgREST either accepted it (2xx, persistence
+    # then decided by read-back) or denied it on authorization grounds (401/403,
+    # column is write-protected). A 400/409/422 is value/constraint rejection: it
+    # proves nothing about whether a VALID privileged value would be accepted, so
+    # it is inconclusive. If every probed column was only value-rejected we must
+    # NOT report clean (see the inconclusive skip after the loop).
+    saw_conclusive = False
     try:
         # One PATCH per field: a single multi-column UPDATE is atomic, so one
         # protected column would roll the whole statement back and mask a
         # genuinely writable sibling (an attacker would simply send that field
-        # alone). Each PATCH's status only tells us the write was not denied; the
-        # finding is decided by the independent read-back below.
-        for field, sentinel in injected.items():
+        # alone). The finding is decided by the independent read-back below.
+        for field, value in injected.items():
             resp = user_a_client.patch(
-                url, params={pk: f"eq.{pkval}"}, json={field: sentinel}, headers=patch_headers
+                url, params={pk: f"eq.{pkval}"}, json={field: value}, headers=patch_headers
             )
             evidence.capture(
                 FakeResponse(resp.status_code, url, f"[body omitted] PATCH {field}", "PATCH"),
                 label=f"mass_assign_patch_{table}_{field}",
             )
+            if resp.status_code in (401, 403) or 200 <= resp.status_code < 300:
+                saw_conclusive = True
 
         rb = user_a_client.get(url, params={pk: f"eq.{pkval}", "select": "*"}, headers=read_headers)
         evidence.capture(
@@ -431,6 +462,15 @@ def test_postgrest_mass_assignment_own_row(table, profile, user_a_client, eviden
         persisted = _reflected_privileged_fields(rb_row, injected)
     finally:
         _restore_postgrest_row(user_a_client, url, pk, pkval, originals, patch_headers, evidence, table)
+
+    if not persisted and not saw_conclusive:
+        pytest.skip(
+            f"Every privileged-column write on '{table}' was rejected by value/"
+            "constraint validation (no 2xx accept and no 401/403 denial), so the "
+            "mass-assignment surface is undetermined: a valid privileged value for "
+            "this schema may still be assignable. Configure schema-appropriate "
+            "privileged values to probe it conclusively."
+        )
 
     assert not persisted, (
         f"Mass assignment accepted on table '{table}': the client set privileged "
@@ -457,15 +497,20 @@ def test_postgrest_mass_assignment_own_row(table, profile, user_a_client, eviden
 def test_firestore_mass_assignment_own_doc(collection, profile, user_a_client, evidence):
     """A client must not persist privileged fields onto its own Firestore doc.
 
-    Snapshot user_a's own document (``test_document_ids.user_a``), PATCH it with
-    privileged fields via ``updateMask`` one field at a time, then GET the
+    Confirm user_a can read their own document (positive control), then PATCH it
+    with privileged fields via ``updateMask`` one field at a time, then GET the
     document back and confirm none of the injected sentinels persisted. Unlike
     the status-only privilege-field write in ``test_firestore_rules.py``, the
     finding here is a PERSISTED value confirmed by read-back, not a 200. Security
     Rules that allow arbitrary self-writes let the app trust a self-asserted
-    ``isAdmin`` / ``role`` from the document store (CWE-915 / V8.2.3). The probe
-    best-effort restores the document afterward. Skips cleanly when the
-    collection list or ``test_document_ids.user_a`` is absent.
+    ``isAdmin`` / ``role`` from the document store (CWE-915 / V8.2.3).
+
+    Firestore's PATCH upserts, so every write carries ``currentDocument.exists``
+    and the probe runs only when the baseline document already exists. That keeps
+    a missing/misconfigured ``test_document_ids.user_a`` from turning the probe
+    into document creation and a false positive. The probe best-effort restores
+    the document afterward. Skips cleanly when the collection list or
+    ``test_document_ids.user_a`` is absent, or the baseline doc is unreadable.
     """
     if collection == "skip":
         pytest.skip("No Firestore collections in profile, nothing to mass-assign (V8.2.3).")
@@ -488,39 +533,65 @@ def test_firestore_mass_assignment_own_doc(collection, profile, user_a_client, e
     if auth:
         headers["Authorization"] = auth
 
-    # Snapshot the original document for teardown.
+    # Positive-control gate (mirrors test_firestore_rules): the probe is only
+    # meaningful against a PRE-EXISTING document the user already owns. Firestore's
+    # PATCH upserts, so without this gate a missing/misconfigured user_a doc would
+    # turn the probe into document CREATION, and read-back would then find the
+    # fields the probe itself wrote and report a false positive. Skip unless the
+    # baseline document is readable now.
     pre = user_a_client.get(doc_url, headers=headers)
     evidence.capture(
         FakeResponse(pre.status_code, doc_url, f"[body omitted] read own doc in {collection}", "GET"),
         label=f"mass_assign_select_{collection}",
     )
     try:
-        pre_fields = (pre.json().get("fields") or {}) if pre.status_code == 200 else {}
+        pre_body = pre.json() if pre.status_code == 200 else {}
     except Exception:  # noqa: BLE001
-        pre_fields = {}
+        pre_body = {}
+    if not (isinstance(pre_body, dict) and pre_body.get("name")):
+        pytest.skip(
+            f"Positive control failed: cannot read user_a's own document "
+            f"'{doc_id}' in collection '{collection}' (HTTP {pre.status_code}). "
+            "Without a readable baseline the upserting PATCH would create the "
+            "document rather than test mass assignment, so the probe is skipped."
+        )
+    pre_fields = pre_body.get("fields") or {}
 
     injected = dict(_FIRESTORE_PRIVILEGED_FIELDS)
     wrote: list[str] = []
     persisted: list[str] = []
+    saw_conclusive = False
     try:
         # One PATCH per field: a Firestore commit is atomic, so a rule that denies
         # any single field in a multi-field write fails the whole commit and would
-        # mask a field the attacker could set on its own.
+        # mask a field the attacker could set on its own. currentDocument.exists
+        # makes every write a pure UPDATE: if the doc vanished (TOCTOU after the
+        # gate), Firestore returns FAILED_PRECONDITION instead of creating it.
         for field, sentinel in injected.items():
             patch_resp = user_a_client.patch(
                 doc_url,
                 json={"fields": _firestore_typed_fields({field: sentinel})},
                 headers=headers,
-                params={"updateMask.fieldPaths": field},
+                params={"updateMask.fieldPaths": field, "currentDocument.exists": "true"},
             )
             evidence.capture(
                 FakeResponse(patch_resp.status_code, doc_url, f"[body omitted] PATCH {field}", "PATCH"),
                 label=f"mass_assign_patch_{collection}_{field}",
             )
-            if patch_resp.status_code not in (401, 403):
+            if 200 <= patch_resp.status_code < 300:
                 wrote.append(field)
+                saw_conclusive = True
+            elif patch_resp.status_code in (401, 403):
+                saw_conclusive = True
 
         if not wrote:
+            if not saw_conclusive:
+                pytest.skip(
+                    f"Every privileged write to '{collection}' was rejected for a "
+                    "non-authorization reason (no 2xx, no 401/403), e.g. a failed "
+                    "currentDocument precondition; mass-assignment safety is "
+                    "undetermined."
+                )
             return  # Security Rules denied every privileged write. Control enforced.
 
         # Read-back: a 200 does not prove persistence, so confirm the stored doc.
