@@ -417,7 +417,8 @@ firebase:                              # auth: firebase and/or storage/database:
   test_storage_paths: {user_a: "users/uid-a/f.pdf", user_b: "users/uid-b/f.pdf"}
 
 nextauth:                              # auth: nextauth
-  signin_path: "/api/auth/callback/credentials"   # Optional; sensible defaults.
+  signin_path: "/api/auth/signin"                 # HTML sign-in page (credential field-name discovery); default.
+  callback_path: "/api/auth/callback/credentials" # Credential POST target; default.
   session_path: "/api/auth/session"
 
 aws:                                   # storage: s3

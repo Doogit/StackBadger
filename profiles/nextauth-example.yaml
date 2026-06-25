@@ -17,10 +17,15 @@ stack:
   database: supabase
   storage: supabase
 
-# NextAuth endpoint paths (the defaults shown — override only if your app
-# mounts the Auth.js handler somewhere other than /api/auth).
+# NextAuth endpoint paths (the Auth.js defaults shown; override only if your app
+# mounts the handler somewhere other than /api/auth). signin_path is the HTML
+# sign-in PAGE, used to discover the credential form's field names; it is a
+# different route from callback_path, the credential POST target. Pointing
+# signin_path at the callback route skips field discovery and falls back to
+# email/password, so a custom-field form (username/pass) would not be exercised.
 nextauth:
-  signin_path: "/api/auth/callback/credentials"
+  signin_path: "/api/auth/signin"
+  callback_path: "/api/auth/callback/credentials"
   session_path: "/api/auth/session"
   csrf_path: "/api/auth/csrf"
 
