@@ -566,25 +566,39 @@ def _send_signin(url: str, **send_kwargs) -> tuple[int, str]:
 # Standard Auth.js endpoint paths (mirrors the auth/nextauth.py adapter
 # defaults); a profile may override them in its ``nextauth`` block.
 _NEXTAUTH_DEFAULT_CSRF_PATH = "/api/auth/csrf"
+_NEXTAUTH_DEFAULT_SIGNIN_PATH = "/api/auth/signin"
 _NEXTAUTH_DEFAULT_CALLBACK_PATH = "/api/auth/callback/credentials"
 
 
 def _nextauth_signin_attempt(
-    base_url: str, csrf_path: str, callback_path: str, email: str, password: str
+    base_url: str,
+    csrf_path: str,
+    signin_path: str,
+    callback_path: str,
+    email: str,
+    password: str,
 ) -> tuple[int, str]:
     """Run the Auth.js credentials sign-in flow and return (status, body).
 
     Auth.js gates the credentials callback behind a CSRF token, so a bare POST of
     email/password never reaches the provider's authorize() callback and would
     compare two identical CSRF failures (a misleading "safe"). This mirrors the
-    repo's NextAuth adapter (auth/nextauth.py): GET the csrf endpoint for a token
-    (the same client stores the csrf cookie), then POST the callback with
-    csrfToken, callbackUrl, the credentials, and json=true so the response is a
-    JSON body rather than a redirect. Field names default to email/password (the
-    adapter's fallback); a custom-field app would need form-field discovery. A
-    transport failure or a missing csrf token yields a transport sentinel so
+    repo's NextAuth adapter (auth/nextauth.py):
+      1. GET the csrf endpoint for a token (the same client stores the csrf cookie).
+      2. GET the sign-in page and discover the real credential field names via the
+         adapter's own parser, so an app whose form uses username/pass or any other
+         custom field shape is still exercised rather than always posting
+         email/password. Falls back to email/password when discovery fails.
+      3. POST the callback with csrfToken, callbackUrl, the discovered field names,
+         and json=true so the response is a JSON body rather than a redirect.
+
+    A transport failure or a missing csrf token yields a transport sentinel so
     _enumeration_outcome treats the attempt as inconclusive rather than erroring.
     """
+    # Reuse the adapter's HTML form-field parser (single source of truth for the
+    # credential field-name discovery the real sign-in flow performs).
+    from auth.nextauth import _discover_field_names
+
     base = base_url.rstrip("/")
     try:
         with httpx.Client(
@@ -599,13 +613,27 @@ def _nextauth_signin_attempt(
                     token = ""
             if not token:
                 return -1, "<no csrf token; the credentials callback is unreachable>"
+
+            # Discover the credential form field names (fallback: email/password).
+            fields = {"email_field": "email", "password_field": "password"}
+            try:
+                page = client.get(
+                    f"{base}{signin_path}",
+                    headers={"Accept": "text/html"},
+                    timeout=10.0,
+                )
+                if page.status_code == 200:
+                    fields = _discover_field_names(safe_text(page), callback_path)
+            except httpx.HTTPError:
+                pass  # keep the email/password fallback
+
             resp = client.post(
                 f"{base}{callback_path}",
                 data={
                     "csrfToken": token,
                     "callbackUrl": base,
-                    "email": email,
-                    "password": password,
+                    fields["email_field"]: email,
+                    fields["password_field"]: password,
                     "json": "true",
                 },
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -920,14 +948,22 @@ def test_signin_response_is_enumeration_safe(profile, evidence):
             (nextauth_cfg and getattr(nextauth_cfg, "csrf_path", None))
             or _NEXTAUTH_DEFAULT_CSRF_PATH
         )
+        signin_path = (
+            (nextauth_cfg and getattr(nextauth_cfg, "signin_path", None))
+            or _NEXTAUTH_DEFAULT_SIGNIN_PATH
+        )
         callback_path = (
             (nextauth_cfg and getattr(nextauth_cfg, "callback_path", None))
             or _NEXTAUTH_DEFAULT_CALLBACK_PATH
         )
+        # The callback is the endpoint the two attempts compare, so expose it as
+        # `url` for the shared evidence/failure path below (every other provider
+        # branch sets `url`; without this the disclosure path raises NameError).
+        url = f"{base_url.rstrip('/')}{callback_path}"
 
         def _attempt(email: str) -> tuple[int, str]:
             return _nextauth_signin_attempt(
-                base_url, csrf_path, callback_path, email, wrong_password
+                base_url, csrf_path, signin_path, callback_path, email, wrong_password
             )
 
     else:
