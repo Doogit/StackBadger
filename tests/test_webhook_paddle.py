@@ -102,12 +102,18 @@ def _forged_paddle_signature() -> str:
     return f"ts={ts};h1={h1}"
 
 
-def _valid_paddle_signature(body: bytes, secret: str) -> str:
-    """Compute a valid Paddle-Signature (HMAC-SHA256 over ts:body)."""
-    ts = str(int(time.time()))
-    signed_payload = ts.encode() + b":" + body
+def _valid_paddle_signature(body: bytes, secret: str, ts: int | None = None) -> str:
+    """Compute a valid Paddle-Signature (HMAC-SHA256 over ts:body).
+
+    `ts` defaults to the current unix time; pass an explicit (e.g. stale)
+    timestamp to exercise the replay/freshness window. The HMAC is still
+    genuinely valid for that timestamp, so a compliant receiver must reject it
+    on age alone, not on signature mismatch.
+    """
+    ts_str = str(ts if ts is not None else int(time.time()))
+    signed_payload = ts_str.encode() + b":" + body
     h1 = hmac.new(secret.encode(), signed_payload, hashlib.sha256).hexdigest()
-    return f"ts={ts};h1={h1}"
+    return f"ts={ts_str};h1={h1}"
 
 
 def _get_paddle_webhook_secret(profile) -> str | None:
@@ -144,8 +150,16 @@ def _get_paddle_webhook_secret(profile) -> str | None:
 
 @pytest.mark.paddle
 class TestPaddleWebhookSignature:
-    """Probe Paddle webhook endpoint for signature enforcement weaknesses."""
+    """Probe Paddle webhook endpoint for signature enforcement weaknesses.
 
+    asvs/cwe tags are applied per method, not at the class level: the signature
+    probes map to V4.1.5 / CWE-345 (per-message authenticity), while the
+    stale-timestamp replay probe maps to V2.3.3 / CWE-294 (replay / idempotency),
+    so the coverage ledger does not count replay coverage as signature coverage.
+    """
+
+    @pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+    @pytest.mark.cwe("345")  # insufficient verification of data authenticity
     def test_missing_paddle_signature(self, profile, evidence):
         """POST with no Paddle-Signature header must be rejected (400 or 401).
 
@@ -184,6 +198,8 @@ class TestPaddleWebhookSignature:
             f"Expected 400/401/403 for missing Paddle-Signature; got {resp.status_code}"
         )
 
+    @pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+    @pytest.mark.cwe("345")  # insufficient verification of data authenticity
     def test_empty_paddle_signature(self, profile, evidence):
         """POST with empty Paddle-Signature header must be rejected."""
         if not _PADDLE_WEBHOOK_PATH:
@@ -220,6 +236,8 @@ class TestPaddleWebhookSignature:
             f"Expected rejection for empty Paddle-Signature; got {resp.status_code}"
         )
 
+    @pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+    @pytest.mark.cwe("345")  # insufficient verification of data authenticity
     def test_forged_paddle_signature(self, profile, evidence):
         """POST with a well-formed but HMAC-invalid Paddle-Signature must be rejected.
 
@@ -262,6 +280,8 @@ class TestPaddleWebhookSignature:
         )
 
     @pytest.mark.write_probe
+    @pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+    @pytest.mark.cwe("345")  # insufficient verification of data authenticity
     def test_body_signature_mismatch(self, profile, evidence):
         """Signature computed over original body but body modified before sending.
 
@@ -351,6 +371,136 @@ class TestPaddleWebhookSignature:
             f"Expected rejection for body/signature mismatch; got {resp.status_code}"
         )
 
+    @pytest.mark.write_probe
+    @pytest.mark.asvs("2.3.3")  # replay / business-logic idempotency (§P2-F), distinct from signature integrity
+    @pytest.mark.cwe("294")  # capture-replay
+    def test_replay_stale_timestamp_rejected(self, profile, evidence):
+        """A validly-signed event with a stale timestamp should not be reprocessed (replay window).
+
+        Paddle binds a unix timestamp into the signed payload (ts:body) so the
+        receiver can reject replays outside a short freshness window (Paddle's SDK
+        default is 5 seconds). This probe computes a *genuinely valid* HMAC over a
+        timestamp ~10 minutes in the past, so a rejection is attributable to the
+        freshness window rather than a signature mismatch.
+
+        Acceptance of the stale event is ambiguous black-box: a handler that
+        deduplicates by event id returns an idempotent 2xx acknowledgement to the
+        replay (the captured webhook had no effect, a valid replay defence), and
+        that is indistinguishable from a handler that simply reprocessed it. So the
+        probe reports MEDIUM only when the stale-leg response body differs from the
+        baseline acknowledgement, which is positive evidence the stale event was
+        processed afresh. An identical 2xx ack, or any non-2xx rejection, is treated
+        as adequate, mirroring the LemonSqueezy replay-informational heuristic.
+
+        Requires the Paddle webhook secret (to forge a valid signature over the old
+        timestamp); without it a forged signature would be rejected at the HMAC gate
+        before the freshness check runs, so the probe skips-inconclusive. A
+        current-timestamp baseline confirms the secret is live (and supplies the
+        reference ack body) before the stale-timestamp leg is interpreted.
+
+        Severity: MEDIUM (replay/idempotency gap, not a full signature bypass).
+        """
+        if not _PADDLE_WEBHOOK_PATH:
+            pytest.skip("payments.paddle_webhook_path not set in profile")
+
+        secret = _get_paddle_webhook_secret(profile)
+        if not secret:
+            pytest.skip(
+                "payments.paddle_webhook_secret not set in profile and "
+                "PADDLE_WEBHOOK_SECRET env var not set; cannot compute a real "
+                "HMAC over a stale timestamp for the replay probe"
+            )
+
+        url = _webhook_url(profile)
+        body = json.dumps(_PADDLE_EVENT_BODY).encode()
+
+        # Baseline: a current-timestamp valid signature must be accepted. If it is
+        # not, the secret is stale and a stale-timestamp rejection below would be
+        # meaningless (we could not attribute it to the freshness window). The
+        # baseline ack body is also the reference for the reprocessing heuristic.
+        baseline_sig = _valid_paddle_signature(body, secret)
+        baseline_resp = send_request(
+            "POST",
+            url,
+            headers={
+                "Content-Type": "application/json",
+                "Paddle-Signature": baseline_sig,
+            },
+            body=body,
+        )
+
+        if is_spa_catchall(baseline_resp):
+            evidence.capture(baseline_resp, "paddle_replay_baseline_spa_catchall")
+            pytest.skip("webhook path returned SPA catch-all; endpoint not reached; skipping")
+
+        if baseline_resp.status_code == 404:
+            evidence.capture(baseline_resp, "paddle_replay_baseline_404")
+            pytest.skip("webhook endpoint not found (404); skipping remaining probes")
+
+        if not (200 <= baseline_resp.status_code < 300):
+            evidence.capture(baseline_resp, "paddle_replay_baseline_rejected")
+            pytest.skip(
+                f"Baseline current-timestamp request was not accepted "
+                f"(status {baseline_resp.status_code}); cannot assess the replay "
+                "window when the baseline is rejected. Check that the webhook secret "
+                "is current."
+            )
+
+        baseline_body = getattr(baseline_resp, "text", None) or ""
+
+        # Stale leg: a genuinely valid signature over a ~10-minute-old timestamp,
+        # replaying the same event the baseline just delivered.
+        stale_ts = int(time.time()) - 600
+        stale_sig = _valid_paddle_signature(body, secret, ts=stale_ts)
+        resp = send_request(
+            "POST",
+            url,
+            headers={
+                "Content-Type": "application/json",
+                "Paddle-Signature": stale_sig,
+            },
+            body=body,
+        )
+
+        if is_spa_catchall(resp):
+            evidence.capture(resp, "paddle_replay_stale_spa_catchall")
+            pytest.skip("webhook path returned SPA catch-all; endpoint not reached; skipping")
+
+        if resp.status_code == 404:
+            evidence.capture(resp, "paddle_replay_stale_404")
+            pytest.skip("webhook endpoint not found (404); skipping remaining probes")
+
+        if 200 <= resp.status_code < 300:
+            stale_body = getattr(resp, "text", None) or ""
+            if stale_body and stale_body != baseline_body:
+                # Different response than the baseline ack: positive evidence the
+                # stale event was reprocessed rather than idempotently acknowledged.
+                evidence.capture(resp, "paddle_replay_stale_reprocessed")
+                pytest.fail(
+                    f"MEDIUM: Paddle webhook accepted a validly-signed event with a "
+                    f"stale timestamp ({stale_ts}, ~10 min old): {url} returned "
+                    f"{resp.status_code} and a response body differing from the "
+                    "baseline acknowledgement, which suggests the stale event was "
+                    "reprocessed rather than deduplicated (a dedup-aware handler that "
+                    "returns a distinct duplicate-ack body is the known false-positive "
+                    "corner of this heuristic). Reject signatures whose timestamp is "
+                    "outside a short tolerance (Paddle's default is 5 seconds) and "
+                    "deduplicate by event id."
+                )
+            # Identical 2xx: most likely an idempotent acknowledgement of the
+            # duplicate event id, which neutralises the replay. Indistinguishable
+            # black-box from a missing freshness window that happened to no-op, so
+            # not reported as a finding (matches the LemonSqueezy replay heuristic).
+            evidence.capture(resp, "paddle_replay_stale_idempotent_ack")
+            return
+
+        # Non-2xx: the stale event was not accepted (freshness window or other
+        # rejection); the replay was not honoured. Handler crashes on the stale
+        # event are a robustness concern owned by test_unexpected_event_type.
+        return
+
+    @pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+    @pytest.mark.cwe("345")  # insufficient verification of data authenticity
     def test_unexpected_event_type(self, profile, evidence):
         """Unexpected event_type with forged signature — robustness probe only.
 
@@ -403,6 +553,8 @@ class TestPaddleWebhookSignature:
             f"Expected signature rejection (400/401/403) for forged request; got {resp.status_code}"
         )
 
+    @pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+    @pytest.mark.cwe("345")  # insufficient verification of data authenticity
     def test_json_parsing_before_verification(self, profile, evidence):
         """Detect JSON-parsing-before-verification via pretty-print vs minified response diff.
 

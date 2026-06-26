@@ -131,6 +131,8 @@ def _clerk_payload(event_type: str = "user.created") -> bytes:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.stripe
+@pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+@pytest.mark.cwe("345")  # insufficient verification of data authenticity
 @pytest.mark.parametrize("endpoint", _STRIPE_ENDPOINTS, ids=[_endpoint_id(e) for e in _STRIPE_ENDPOINTS])
 def test_stripe_webhook_no_signature(endpoint, profile, evidence):
     """Stripe webhook endpoint must return 400 when Stripe-Signature header is absent."""
@@ -152,6 +154,8 @@ def test_stripe_webhook_no_signature(endpoint, profile, evidence):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.stripe
+@pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+@pytest.mark.cwe("345")  # insufficient verification of data authenticity
 @pytest.mark.parametrize("endpoint", _STRIPE_ENDPOINTS, ids=[_endpoint_id(e) for e in _STRIPE_ENDPOINTS])
 def test_stripe_webhook_forged_signature(endpoint, profile, evidence):
     """Stripe webhook endpoint must return 400 for a forged Stripe-Signature (wrong key)."""
@@ -178,6 +182,8 @@ def test_stripe_webhook_forged_signature(endpoint, profile, evidence):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.stripe
+@pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+@pytest.mark.cwe("345")  # insufficient verification of data authenticity
 @pytest.mark.parametrize("endpoint", _STRIPE_ENDPOINTS, ids=[_endpoint_id(e) for e in _STRIPE_ENDPOINTS])
 def test_stripe_webhook_unexpected_event_type(endpoint, profile, evidence):
     """Stripe webhook must return 200 for unrecognised event types but not mutate state.
@@ -217,6 +223,8 @@ def test_stripe_webhook_unexpected_event_type(endpoint, profile, evidence):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.stripe
+@pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+@pytest.mark.cwe("345")  # insufficient verification of data authenticity
 @pytest.mark.parametrize("endpoint", _STRIPE_ENDPOINTS, ids=[_endpoint_id(e) for e in _STRIPE_ENDPOINTS])
 def test_stripe_payment_bypass_spoofed_event(endpoint, profile, evidence):
     """Spoofed checkout.session.completed with arbitrary user_id must be rejected at signature.
@@ -263,17 +271,30 @@ def test_stripe_payment_bypass_spoofed_event(endpoint, profile, evidence):
 
 
 # ---------------------------------------------------------------------------
-# Stripe webhook — replay attack (old timestamp in signature)
+# Stripe webhook: forged replay (old timestamp on a forged signature)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.stripe
+@pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+@pytest.mark.cwe("345")  # insufficient verification of data authenticity
 @pytest.mark.parametrize("endpoint", _STRIPE_ENDPOINTS, ids=[_endpoint_id(e) for e in _STRIPE_ENDPOINTS])
-def test_stripe_webhook_replay_old_timestamp(endpoint, profile, evidence):
-    """Stripe webhook must return 400 for a replayed event with a stale timestamp.
+def test_stripe_webhook_forged_replay_rejected(endpoint, profile, evidence):
+    """A replayed event carrying a FORGED signature must be rejected at the signature gate.
 
-    Stripe's signature scheme includes a timestamp; replayed events with
-    timestamps older than 5 minutes should be rejected. This test sends a
-    forged header with a timestamp from 10 minutes ago.
+    This is a signature-verification probe, not a freshness-window probe. The
+    harness has no Stripe webhook signing secret (unlike Paddle/LemonSqueezy,
+    which expose secret resolvers), so it cannot mint a *valid* signature over a
+    stale timestamp. It therefore replays an event with a forged signature and a
+    10-minute-old timestamp: a correct handler rejects it at the HMAC gate (the
+    stale timestamp is never evaluated), and a handler that accepts it has a
+    signature bypass. The failure mode is signature authenticity (CWE-345,
+    HIGH / webhook_spoofing), not a replay/idempotency gap, which is why this node
+    stays in webhook_spoofing rather than routing to webhook_replay like the
+    valid-signature Paddle/LemonSqueezy replay probes.
+
+    A true Stripe freshness/replay probe (a valid signature over a stale
+    timestamp) would need Stripe webhook-secret plumbing the harness does not yet
+    have; that is a tracked follow-up.
     """
     url = _endpoint_url(profile, endpoint)
     payload = _stripe_payload()
@@ -299,6 +320,8 @@ def test_stripe_webhook_replay_old_timestamp(endpoint, profile, evidence):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.clerk
+@pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+@pytest.mark.cwe("345")  # insufficient verification of data authenticity
 @pytest.mark.parametrize("endpoint", _CLERK_ENDPOINTS, ids=[_endpoint_id(e) for e in _CLERK_ENDPOINTS])
 def test_clerk_webhook_no_svix_headers(endpoint, profile, evidence):
     """Clerk webhook must return 400 when all svix verification headers are absent."""
@@ -320,6 +343,8 @@ def test_clerk_webhook_no_svix_headers(endpoint, profile, evidence):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.clerk
+@pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+@pytest.mark.cwe("345")  # insufficient verification of data authenticity
 @pytest.mark.parametrize("endpoint", _CLERK_ENDPOINTS, ids=[_endpoint_id(e) for e in _CLERK_ENDPOINTS])
 def test_clerk_webhook_forged_svix_headers(endpoint, profile, evidence):
     """Clerk webhook must return 400 for forged svix-* signature headers."""

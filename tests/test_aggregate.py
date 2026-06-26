@@ -304,6 +304,9 @@ def test_phase2_modules_fully_wired_into_ledger(stem, category, severity, prefix
         # §P2-D auth-delta probes (extend test_auth_flows.py).
         ("test_registration_rejects_weak_password", "password_policy", "MEDIUM", "PWPOL"),
         ("test_signin_response_is_enumeration_safe", "user_enumeration", "MEDIUM", "ENUM"),
+        # §P2-F Paddle stale-timestamp replay (extends test_webhook_paddle.py); routes
+        # to webhook_replay/MEDIUM, overriding the paddle stem's HIGH/webhook_paddle.
+        ("test_replay_stale_timestamp_rejected", "webhook_replay", "MEDIUM", "WREPLAY"),
     ],
 )
 def test_phase2_per_test_override_modules_wired_into_ledger(
@@ -320,6 +323,99 @@ def test_phase2_per_test_override_modules_wired_into_ledger(
     assert _why_it_matters_for_category(category) != (
         "This vulnerability may impact application security."
     )
+
+
+# §P2-F payments maps the existing Stripe/Paddle/LemonSqueezy + payment-gate probes
+# into the ASVS/CWE ledger. These modules already carry file-stem ledger entries; guard
+# them with the same DoD as the Phase-1/2 new modules so a dropped severity/category/
+# prefix or a generic content fallback fails offline (a downgraded HIGH webhook/payment
+# finding would break the run.sh exit-1 gate).
+@pytest.mark.parametrize(
+    "stem,category,severity,prefix",
+    [
+        ("test_payment_gate", "payment_gate", "HIGH", "PAY"),
+        ("test_webhook_spoofing", "webhook_spoofing", "HIGH", "HOOK"),
+        ("test_webhook_paddle", "webhook_paddle", "HIGH", "PADL"),
+        ("test_webhook_lemonsqueezy", "webhook_lemonsqueezy", "MEDIUM", "LMSQ"),
+    ],
+)
+def test_phase2f_payment_modules_wired_into_ledger(stem, category, severity, prefix):
+    assert TEST_SEVERITY_MAP.get(stem) == severity
+    assert TEST_CATEGORY_MAP.get(stem) == category
+    assert _CATEGORY_PREFIXES.get(category) == prefix
+    # Content dicts must return module-specific (non-generic) text.
+    assert _remediation_for_category(category, severity, {}) != (
+        "Review the flagged code path and apply secure coding best practices."
+    )
+    assert _root_cause_for_category(category) != "Unclassified vulnerability."
+    assert _why_it_matters_for_category(category) != (
+        "This vulnerability may impact application security."
+    )
+
+
+def test_paddle_replay_override_resolves_through_class_qualified_nodeid():
+    """The §P2-F Paddle replay probe is a class method, so its nodeid carries a
+    `TestPaddleWebhookSignature::` prefix and no [param] suffix. Drive the real
+    aggregator pipeline (not just the static override maps) to prove the per-test
+    override still resolves through the class-qualified nodeid. Without correct
+    class-prefix stripping the finding would fall back to the paddle stem
+    (webhook_paddle/HIGH/PADL-###), flipping a MEDIUM-only run.sh from exit 2 to
+    exit 1. The parametrized static-map guard above cannot catch a regression in
+    that lookup; this end-to-end test does.
+    """
+    # Deliberately omit any inline severity keyword from the longrepr so the MEDIUM
+    # resolves through _TEST_NAME_SEVERITY_OVERRIDES, not _extract_severity_from_message.
+    # This guards both the category AND the severity override resolving through the
+    # class-qualified, non-parametrized nodeid. (The inline-"MEDIUM:" path the probe
+    # actually emits is covered by test_inline_high_escalation_from_frame_ancestors_pytest_fail.)
+    pytest_data = {
+        "tests": [
+            {
+                "nodeid": (
+                    "tests/test_webhook_paddle.py::TestPaddleWebhookSignature::"
+                    "test_replay_stale_timestamp_rejected"
+                ),
+                "outcome": "failed",
+                "call": {"longrepr": "Failed: Paddle webhook accepted a stale-timestamp event ..."},
+            }
+        ]
+    }
+
+    findings = build_pytest_findings(pytest_data, {}, {}, {})
+
+    assert len(findings) == 1
+    assert findings[0]["category"] == "webhook_replay"
+    assert findings[0]["severity"] == "MEDIUM"
+    assert findings[0]["id"].startswith("WREPLAY-")
+
+
+def test_stripe_forged_replay_node_stays_webhook_spoofing():
+    """The Stripe forged-replay probe sends a FORGED signature (the harness has no
+    Stripe webhook secret), so a failure is a signature bypass, not a replay gap. It
+    deliberately stays in webhook_spoofing/HIGH rather than routing to
+    webhook_replay/MEDIUM like the valid-signature Paddle/LemonSqueezy replay probes:
+    routing it to webhook_replay would mislabel and downgrade a real signature bypass.
+    Lock that classification in so it is not "corrected" to webhook_replay by mistake.
+    """
+    pytest_data = {
+        "tests": [
+            {
+                "nodeid": (
+                    "tests/test_webhook_spoofing.py::"
+                    "test_stripe_webhook_forged_replay_rejected[POST:/webhook]"
+                ),
+                "outcome": "failed",
+                "call": {"longrepr": "Failed: webhook returned 200 for a forged stale signature ..."},
+            }
+        ]
+    }
+
+    findings = build_pytest_findings(pytest_data, {}, {}, {})
+
+    assert len(findings) == 1
+    assert findings[0]["category"] == "webhook_spoofing"
+    assert findings[0]["severity"] == "HIGH"
+    assert findings[0]["id"].startswith("HOOK-")
 
 
 def test_inline_high_escalation_from_frame_ancestors_pytest_fail():
@@ -342,6 +438,14 @@ def test_inline_high_escalation_from_frame_ancestors_pytest_fail():
         "'(absent)'); the app relies on legacy X-Frame-Options ('DENY')."
     )
     assert _extract_severity_from_message(medium_longrepr) is None
+    # The §P2-F Paddle replay probe emits an inline "MEDIUM:" on its reprocessing
+    # path. It agrees with the override-map MEDIUM today, but guard the extractor's
+    # MEDIUM branch so a future inline keyword change is caught rather than silent.
+    paddle_replay_longrepr = (
+        "Failed: MEDIUM: Paddle webhook reprocessed a validly-signed event with a "
+        "stale timestamp ..."
+    )
+    assert _extract_severity_from_message(paddle_replay_longrepr) == "MEDIUM"
 
 
 def test_pytest_finding_override_resolves_through_parametrize_suffix():

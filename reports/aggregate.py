@@ -120,6 +120,11 @@ _TEST_NAME_SEVERITY_OVERRIDES: dict[str, str] = {
     "test_served_upload_sets_content_disposition": "MEDIUM",
     "test_registration_rejects_weak_password": "MEDIUM",
     "test_signin_response_is_enumeration_safe": "MEDIUM",
+    # §P2-F Paddle stale-timestamp replay extends test_webhook_paddle.py (HIGH stem)
+    # but is a replay/idempotency gap rated MEDIUM, matching the webhook_replay
+    # category. Pin it here so the paddle stem's HIGH does not over-rate it. A true
+    # bypass (accepted stale event) emits "MEDIUM:" inline, which resolves the same.
+    "test_replay_stale_timestamp_rejected": "MEDIUM",
 }
 
 # Per-test category overrides (test function name → category).
@@ -130,6 +135,10 @@ _TEST_NAME_SEVERITY_OVERRIDES: dict[str, str] = {
 _TEST_NAME_CATEGORY_OVERRIDES: dict[str, str] = {
     # Replay / idempotency probes
     "test_replay_protection_informational": "webhook_replay",
+    # §P2-F Paddle stale-timestamp replay (extends test_webhook_paddle.py): a
+    # freshness-window concern, not generic signature verification, so route it
+    # to webhook_replay rather than the paddle stem's webhook_paddle default.
+    "test_replay_stale_timestamp_rejected": "webhook_replay",
     # Robustness probes (handler crash on unknown event types)
     "test_event_type_spoofing_robustness": "webhook_robustness",
     "test_unexpected_event_type": "webhook_robustness",

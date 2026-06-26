@@ -143,8 +143,16 @@ def _get_webhook_secret(profile) -> str | None:
 
 @pytest.mark.lemonsqueezy
 class TestLemonSqueezyWebhookSignature:
-    """Probe LemonSqueezy webhook endpoint for signature enforcement weaknesses."""
+    """Probe LemonSqueezy webhook endpoint for signature enforcement weaknesses.
 
+    asvs/cwe tags are applied per method, not at the class level: the signature
+    probes map to V4.1.5 / CWE-345 (per-message authenticity), while the replay
+    probe maps to V2.3.3 / CWE-294 (replay / idempotency), so the coverage ledger
+    does not count replay coverage as signature coverage.
+    """
+
+    @pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+    @pytest.mark.cwe("345")  # insufficient verification of data authenticity
     def test_missing_x_signature(self, profile, evidence):
         """POST with no X-Signature header must be rejected (400 or 401).
 
@@ -184,6 +192,8 @@ class TestLemonSqueezyWebhookSignature:
             f"Expected 400/401/403 for missing X-Signature; got {resp.status_code}"
         )
 
+    @pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+    @pytest.mark.cwe("345")  # insufficient verification of data authenticity
     def test_forged_x_signature(self, profile, evidence):
         """POST with a random 64-hex X-Signature must be rejected.
 
@@ -226,6 +236,8 @@ class TestLemonSqueezyWebhookSignature:
         )
 
     @pytest.mark.write_probe
+    @pytest.mark.asvs("2.3.3")  # replay / business-logic idempotency (§P2-F), distinct from signature integrity
+    @pytest.mark.cwe("294")  # capture-replay
     def test_replay_protection_informational(self, profile, evidence, evidence_dir):
         """Informational: LemonSqueezy webhooks lack replay protection.
 
@@ -405,6 +417,8 @@ class TestLemonSqueezyWebhookSignature:
 
         return resp
 
+    @pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+    @pytest.mark.cwe("345")  # insufficient verification of data authenticity
     def test_event_type_spoofing_bypass(self, profile, evidence):
         """Spoofed event with forged signature must NOT be accepted (200 = CRITICAL bypass).
 
@@ -425,6 +439,8 @@ class TestLemonSqueezyWebhookSignature:
             f"Expected rejection for spoofed event_name with forged signature; got {resp.status_code}"
         )
 
+    @pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+    @pytest.mark.cwe("345")  # insufficient verification of data authenticity
     def test_event_type_spoofing_robustness(self, profile, evidence):
         """Spoofed event with forged signature must not crash the handler (500 = HIGH).
 
@@ -442,6 +458,8 @@ class TestLemonSqueezyWebhookSignature:
             "handler must not crash on unrecognised LemonSqueezy event types"
         )
 
+    @pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+    @pytest.mark.cwe("345")  # insufficient verification of data authenticity
     def test_json_parsing_before_verification(self, profile, evidence):
         """Detect JSON-parsing-before-verification via pretty-print vs minified response diff.
 
