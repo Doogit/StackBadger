@@ -23,8 +23,9 @@ cleanly there; only the pure classifiers below run offline.
       flows:                        # step-sequence enforcement (V2.3.1 / CWE-841)
         - name: checkout
           gated_step: {path: /checkout/confirm, method: POST, probe_body: {...}}
-          success_signal: "order_id"   # optional substring proving the action ran
-          reject_statuses: [409, 422]  # optional; defaults below
+          success_field: "order_id"    # optional JSON field (dotted path) present
+                                       #   ONLY on genuine completion
+          reject_statuses: [422]       # optional; opt in extra order-rejection codes
       quota:                        # per-user quota / anti-automation (V2.4.1 / CWE-799)
         endpoint: {path: /api/generate, method: POST, probe_body: {...}}
         burst: 60                   # optional; defaults below
@@ -36,15 +37,16 @@ Both classifiers prefer **skip-inconclusive-with-reason** over a guessed
 pass/fail (a standing project gate). A bare 2xx on a gated step cannot, by
 itself, distinguish a real out-of-order execution from a no-op success, so the
 step-sequence probe only flags a HIGH bypass when an operator-declared
-``success_signal`` confirms the action ran; without it a 2xx is indeterminate
-and the probe skips rather than emitting a false HIGH. The ``success_signal``
-must be a token that appears ONLY on genuine completion (e.g. a created resource
-id), never a generic field name a 2xx error envelope could also echo
-(``{"error": "order_id required"}`` would otherwise misfire) — a poorly chosen
-signal yields a false HIGH. A 2xx whose body lacks the signal is treated as
-indeterminate (``noop``), NOT as observed enforcement: only a real rejection
-(4xx) proves the control held. The classifiers are pure and unit-tested offline
-at the bottom of this module.
+``success_field`` is **present as a JSON key** in the response (see
+:func:`_success_field_present`); without it a 2xx is indeterminate and the probe
+skips rather than emitting a false HIGH. Structured key-presence (not substring
+matching) is deliberate: an error envelope that merely names the field
+(``{"error": "order_id required"}``) has no such key, so a correctly-blocked flow
+is never mis-flagged. The ``success_field`` should name a field returned ONLY on
+genuine completion (e.g. a created resource id). A 2xx whose body lacks the field
+is treated as indeterminate (``noop``), NOT as observed enforcement: only a real
+rejection (4xx, default 409/425) proves the control held. The classifiers are
+pure and unit-tested offline at the bottom of this module.
 
 Safety
 ------
@@ -63,6 +65,7 @@ tests/test_data_protection.py.
 
 from __future__ import annotations
 
+import json
 import sys as _sys
 from pathlib import Path as _Path
 from urllib.parse import urlsplit
@@ -86,11 +89,15 @@ from tests.helpers import FakeResponse, netlify_url, safe_text  # noqa: E402
 # ---------------------------------------------------------------------------
 
 # Statuses that count as the gated step CORRECTLY rejecting an out-of-order call.
-# 401 is deliberately excluded: we send the gated step as an authenticated user,
-# so a 401 signals an auth problem (or a bad fixture token), NOT step-order
-# enforcement — treating it as "enforced" would be a false pass, so a 401 falls
-# through to "inconclusive" instead. 425 (Too Early) is the most precise signal.
-_REJECTION_STATUSES = frozenset({400, 403, 409, 422, 425})
+# Kept DELIBERATELY NARROW to order-specific codes: 409 (Conflict — state
+# precondition not met) and 425 (Too Early). 400/403/422 are excluded by default
+# because they routinely come from a malformed probe_body, a missing CSRF token,
+# or generic authz — counting them would let a target that fails the real
+# workflow check still be reported "enforced" (a false negative). An operator who
+# KNOWS those codes mean "prerequisite missing" for a specific endpoint opts them
+# in per-flow via ``reject_statuses``. A status outside this set falls through to
+# "inconclusive" (skip), never a guessed pass.
+_REJECTION_STATUSES = frozenset({409, 425})
 
 # Statuses that indicate a per-user quota / rate control fired. 429 (rate) and
 # 402 (payment/plan limit) are unambiguous. 403 is deliberately NOT a default
@@ -110,29 +117,62 @@ _DEFAULT_QUOTA_BURST = 60
 # Pure classifiers (unit-tested offline at the bottom of this module)
 # ---------------------------------------------------------------------------
 
+def _success_field_present(body_text: str, field_path: str) -> bool:
+    """True iff *body_text* parses as JSON containing *field_path* with a value.
+
+    *field_path* is a dotted key path (``order_id`` or ``data.order_id``). At each
+    step a list node is searched element-wise, so a PostgREST-style ``[{...}]``
+    representation is handled. Returns True only when the path resolves to at
+    least one non-null, non-empty value.
+
+    This is STRUCTURED key-presence, not substring matching: an error envelope
+    that merely MENTIONS the field name (``{"error": "order_id required"}``) has
+    no such key, so it is NOT a bypass. A non-JSON body (HTML/text) parses to
+    nothing and is likewise not a bypass — the probe stays conservative.
+    """
+    if not field_path:
+        return False
+    try:
+        nodes = [json.loads(body_text)]
+    except (ValueError, TypeError):
+        return False
+    for key in field_path.split("."):
+        nxt: list = []
+        for node in nodes:
+            if isinstance(node, dict) and key in node:
+                nxt.append(node[key])
+            elif isinstance(node, list):
+                nxt.extend(item[key] for item in node if isinstance(item, dict) and key in item)
+        if not nxt:
+            return False
+        nodes = nxt
+    return any(v not in (None, "", [], {}) for v in nodes)
+
+
 def _step_sequence_verdict(
-    status: int, body_text: str, reject_statuses: set[int], success_signal: str | None
+    status: int, body_text: str, reject_statuses: set[int], success_field: str | None
 ) -> str:
     """Classify an out-of-order gated-step response.
 
     Returns one of:
       - ``"enforced"``    — the step was rejected (status in *reject_statuses*).
-      - ``"bypassed"``    — a 2xx AND *success_signal* is present in the body, so
-                            the gated action demonstrably ran out of order.
-      - ``"noop"``        — a 2xx but *success_signal* is configured and ABSENT:
+      - ``"bypassed"``    — a 2xx AND *success_field* is present (as a JSON key,
+                            see :func:`_success_field_present`) in the body, so the
+                            gated action demonstrably ran out of order.
+      - ``"noop"``        — a 2xx but *success_field* is configured and ABSENT:
                             either the endpoint no-op'd (control held) OR the
-                            action ran without echoing the signal. Ambiguous, so
+                            action ran without returning the field. Ambiguous, so
                             the probe treats it as indeterminate — NOT as observed
                             enforcement (only a 4xx rejection proves that).
-      - ``"inconclusive"``— a 2xx with no *success_signal* to disambiguate, or any
+      - ``"inconclusive"``— a 2xx with no *success_field* to disambiguate, or any
                             other status (3xx/404/405/5xx/0) that proves neither
                             enforcement nor bypass.
     """
     if status in reject_statuses:
         return "enforced"
     if 200 <= status < 300:
-        if success_signal:
-            return "bypassed" if success_signal.lower() in body_text.lower() else "noop"
+        if success_field:
+            return "bypassed" if _success_field_present(body_text, success_field) else "noop"
         return "inconclusive"
     return "inconclusive"
 
@@ -199,13 +239,14 @@ def test_gated_steps_reject_out_of_order_requests(profile, user_a_client, eviden
 
     For each ``business_logic.flows[]`` entry we call the ``gated_step`` directly
     as the signed-in user_a, WITHOUT first running the flow's prerequisite. A
-    correct rejection (409/422/425/400/403) proves the order is enforced; a 2xx
-    whose body carries the flow's ``success_signal`` proves the gated action ran
-    out of order (a bypass — self-escalated to HIGH via ``pytest.fail("HIGH:")``
-    above the module's MEDIUM default).
+    correct order-rejection (409/425 by default, or the flow's ``reject_statuses``)
+    proves the order is enforced; a 2xx whose body carries the flow's
+    ``success_field`` as a JSON key proves the gated action ran out of order (a
+    bypass — self-escalated to HIGH via ``pytest.fail("HIGH:")`` above the
+    module's MEDIUM default).
 
-    Only a real 4xx rejection counts as observed enforcement. A 2xx whose body
-    lacks the signal (or any 2xx with no ``success_signal`` configured) is
+    Only a real order-rejection counts as observed enforcement. A 2xx whose body
+    lacks the field (or any 2xx with no ``success_field`` configured) is
     INDETERMINATE — a no-op success cannot be told apart from real out-of-order
     processing — so the probe records it and, if no flow returned a clean
     rejection, SKIPS rather than emitting a false pass or a false HIGH. Skips
@@ -233,7 +274,7 @@ def test_gated_steps_reject_out_of_order_requests(profile, user_a_client, eviden
         method = (step.get("method") or "POST").upper()
         body = step.get("probe_body") or {}
         reject = set(flow.get("reject_statuses") or _REJECTION_STATUSES)
-        signal = flow.get("success_signal")
+        success_field = flow.get("success_field")
         url = netlify_url(profile, path)
 
         try:
@@ -250,7 +291,9 @@ def test_gated_steps_reject_out_of_order_requests(profile, user_a_client, eviden
             )
             continue
 
-        verdict = _step_sequence_verdict(resp.status_code, safe_text(resp), reject, signal)
+        verdict = _step_sequence_verdict(
+            resp.status_code, safe_text(resp), reject, success_field
+        )
         evidence.capture(
             FakeResponse(
                 resp.status_code, _strip_query(url),
@@ -266,21 +309,21 @@ def test_gated_steps_reject_out_of_order_requests(profile, user_a_client, eviden
             held.append(f"{name} -> {resp.status_code} (rejected out of order)")
         elif verdict == "noop":
             inconclusive.append(
-                f"{name} -> {resp.status_code} (2xx but success_signal absent — "
-                "no-op or signal misconfigured; enforcement not observable)"
+                f"{name} -> {resp.status_code} (2xx but success_field absent — "
+                "no-op or field misconfigured; enforcement not observable)"
             )
         else:
             inconclusive.append(
                 f"{name} -> {resp.status_code} (indeterminate; a 2xx needs a "
-                "success_signal to classify, other statuses prove nothing)"
+                "success_field to classify, other statuses prove nothing)"
             )
 
     if bypassed:
         # Self-escalate to HIGH so the aggregator lifts above the MEDIUM default.
         pytest.fail(
             "HIGH: gated step(s) accepted out of order with the operator-declared "
-            "success_signal present in the response — the flow does not enforce step "
-            "sequence: " + "; ".join(bypassed) + ". An attacker can skip a "
+            "success_field present in the response JSON — the flow does not enforce "
+            "step sequence: " + "; ".join(bypassed) + ". An attacker can skip a "
             "prerequisite step (payment, verification, approval) and trigger the "
             "gated action directly (ASVS V2.3.1, CWE-841). Enforce server-side that "
             "each step's prerequisite state exists before processing."
@@ -288,11 +331,12 @@ def test_gated_steps_reject_out_of_order_requests(profile, user_a_client, eviden
 
     if not held:
         pytest.skip(
-            "No flow returned a clean rejection (4xx) of the out-of-order call, so "
-            "step-sequence enforcement was not observed: " + "; ".join(inconclusive)
-            + ". Declare an accurate success_signal (a token present only on genuine "
-            "completion) so a 2xx can be classified, rather than guessing a pass "
-            "(no green pass where the control is not observable)."
+            "No flow returned a clean order-rejection (409/425, or the flow's "
+            "reject_statuses) of the out-of-order call, so step-sequence enforcement "
+            "was not observed: " + "; ".join(inconclusive) + ". Declare an accurate "
+            "success_field (a JSON field returned only on genuine completion), or "
+            "opt the endpoint's order-rejection code into reject_statuses, rather "
+            "than guessing a pass (no green pass where the control is not observable)."
         )
 
 
@@ -391,42 +435,71 @@ def test_authenticated_endpoint_enforces_per_user_quota(profile, user_a_client, 
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
-    "status,body,signal,expected",
+    "status,body,field,expected",
     [
-        # Rejections -> enforced (control present). 425 Too Early is the precise one.
+        # Order-specific rejections -> enforced. 409 Conflict / 425 Too Early only.
         (409, "", None, "enforced"),
-        (422, "", None, "enforced"),
         (425, "", None, "enforced"),
-        (403, "", None, "enforced"),
-        (400, "", None, "enforced"),
-        # 2xx + success_signal present -> demonstrable out-of-order bypass.
-        (200, "order_id: 42 confirmed", "order_id", "bypassed"),
-        (201, "Created resource", "created", "bypassed"),
-        (200, "CONFIRMED", "confirmed", "bypassed"),  # case-insensitive
-        # KNOWN LIMITATION (pinned): a 2xx ERROR envelope that echoes the signal
-        # substring classifies "bypassed" -> false HIGH. This is why the module
-        # docstring requires success_signal to be a token present ONLY on genuine
-        # completion (a created id), never a generic field name an error can echo.
-        (200, "Error: order_id is required — cannot confirm", "order_id", "bypassed"),
-        # 2xx + success_signal configured but ABSENT -> noop (indeterminate: the
-        # probe does NOT count this as observed enforcement; only a 4xx does).
-        (200, "nothing was processed", "order_id", "noop"),
-        # 2xx with no success_signal -> indeterminate (cannot disambiguate).
-        (200, "ok", None, "inconclusive"),
+        # 400/403/422 are NOT default rejections (ambiguous: malformed body, CSRF,
+        # generic authz) -> indeterminate, so a target that rejects for an unrelated
+        # reason is NOT falsely credited as enforcing order.
+        (400, "", None, "inconclusive"),
+        (403, "", None, "inconclusive"),
+        (422, "", None, "inconclusive"),
+        # 2xx + success_field present as a JSON key -> demonstrable bypass.
+        (200, '{"order_id": 42}', "order_id", "bypassed"),
+        (201, '{"id": 9, "status": "ok"}', "id", "bypassed"),
+        (200, '{"data": {"order_id": 7}}', "data.order_id", "bypassed"),  # dotted path
+        (200, '[{"order_id": 1}]', "order_id", "bypassed"),               # list repr
+        # FIXED false positive: a 2xx ERROR envelope that merely NAMES the field
+        # has no such key -> noop, NOT a false "bypassed" HIGH. (Was the pinned
+        # substring-match limitation; structured key-presence resolves it.)
+        (200, '{"error": "order_id is required"}', "order_id", "noop"),
+        # 2xx + field configured but absent / null / non-JSON -> noop (indeterminate).
+        (200, '{"status": "queued"}', "order_id", "noop"),
+        (200, '{"order_id": null}', "order_id", "noop"),
+        (200, "plain text OK", "order_id", "noop"),
+        # 2xx with no success_field -> indeterminate (cannot disambiguate).
+        (200, '{"order_id": 42}', None, "inconclusive"),
         # 401 is NOT in the default reject set -> indeterminate (auth, not order).
         (401, "", None, "inconclusive"),
         # Other statuses prove neither enforcement nor bypass.
         (404, "", None, "inconclusive"),
         (405, "", None, "inconclusive"),
         (302, "", None, "inconclusive"),
-        (500, "", "order_id", "inconclusive"),
+        (500, '{"order_id": 1}', "order_id", "inconclusive"),
         (0, "", None, "inconclusive"),
     ],
 )
-def test_step_sequence_verdict_classifies(status, body, signal, expected):
+def test_step_sequence_verdict_classifies(status, body, field, expected):
     assert (
-        _step_sequence_verdict(status, body, set(_REJECTION_STATUSES), signal) == expected
+        _step_sequence_verdict(status, body, set(_REJECTION_STATUSES), field) == expected
     )
+
+
+def test_step_sequence_verdict_honors_custom_reject_statuses():
+    # An operator who knows 422 means "prerequisite missing" for this endpoint opts
+    # it in -> the same 422 now counts as enforced.
+    assert _step_sequence_verdict(422, "", {409, 425, 422}, None) == "enforced"
+
+
+@pytest.mark.parametrize(
+    "body,field,expected",
+    [
+        ('{"order_id": 42}', "order_id", True),
+        ('{"order_id": 0}', "order_id", True),        # 0 is a real value, not empty
+        ('{"order_id": null}', "order_id", False),
+        ('{"order_id": ""}', "order_id", False),      # empty string is not a value
+        ('{"data": {"order_id": 7}}', "data.order_id", True),
+        ('{"data": {}}', "data.order_id", False),
+        ('[{"order_id": 1}]', "order_id", True),      # PostgREST list representation
+        ('{"error": "order_id required"}', "order_id", False),  # name mentioned, no key
+        ("not json at all", "order_id", False),
+        ('{"order_id": 42}', "", False),              # empty field path never matches
+    ],
+)
+def test_success_field_present(body, field, expected):
+    assert _success_field_present(body, field) is expected
 
 
 @pytest.mark.parametrize(

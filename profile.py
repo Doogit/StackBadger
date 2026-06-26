@@ -294,8 +294,11 @@ def _validate_business_logic_block(data: dict[str, Any]) -> None:
                 path: <str>             # required (root-relative, e.g. /checkout/confirm)
                 method: <str>           # optional, defaults POST
                 probe_body: <map>       # optional request body
-              reject_statuses: [<int>]  # optional; statuses that count as a correct rejection
-              success_signal: <str>     # optional; substring proving the gated action ran
+              reject_statuses: [<int>]  # optional; per-flow override of the order-rejection
+                                        #   codes (default 409/425). Opt in 400/403/422 only
+                                        #   when they mean "prerequisite missing" for this endpoint
+              success_field: <str>      # optional; JSON field (dotted path) returned ONLY on
+                                        #   genuine completion — its presence proves a bypass
           quota:                        # per-user quota / anti-automation (V2.4.1 / CWE-799)
             endpoint:
               path: <str>               # required
@@ -335,11 +338,11 @@ def _validate_business_logic_block(data: dict[str, Any]) -> None:
                     "'business_logic.flows[].name' must be a string when present, "
                     f"got {type(name).__name__}"
                 )
-            signal = flow.get("success_signal")
-            if signal is not None and not isinstance(signal, str):
+            success_field = flow.get("success_field")
+            if success_field is not None and not isinstance(success_field, str):
                 raise ValueError(
-                    "'business_logic.flows[].success_signal' must be a string when "
-                    f"present, got {type(signal).__name__}"
+                    "'business_logic.flows[].success_field' must be a string when "
+                    f"present, got {type(success_field).__name__}"
                 )
             _validate_status_list(
                 flow.get("reject_statuses"), "business_logic.flows[].reject_statuses"

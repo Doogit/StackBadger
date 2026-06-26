@@ -51,8 +51,8 @@ _FULL_BLOCK = (
     "          cart_id: abc\n"
     "      reject_statuses:\n"
     "        - 409\n"
-    "        - 422\n"
-    "      success_signal: order_id\n"
+    "        - 425\n"
+    "      success_field: order_id\n"
     "  quota:\n"
     "    endpoint:\n"
     "      path: /api/generate\n"
@@ -74,8 +74,8 @@ def test_load_profile_accepts_full_business_logic_block(tmp_path):
     assert flow.name == "checkout"
     assert flow.gated_step.path == "/checkout/confirm"
     assert flow.gated_step.probe_body.cart_id == "abc"
-    assert list(flow.reject_statuses) == [409, 422]
-    assert flow.success_signal == "order_id"
+    assert list(flow.reject_statuses) == [409, 425]
+    assert flow.success_field == "order_id"
     assert bl.quota.endpoint.path == "/api/generate"
     assert bl.quota.burst == 30
     assert list(bl.quota.limit_statuses) == [429]
@@ -179,13 +179,13 @@ def test_rejects_non_string_flow_name(tmp_path):
         )
 
 
-def test_rejects_non_string_success_signal(tmp_path):
-    with pytest.raises(ValueError, match="success_signal' must be a string"):
+def test_rejects_non_string_success_field(tmp_path):
+    with pytest.raises(ValueError, match="success_field' must be a string"):
         load_profile(
             _write_profile(
                 tmp_path,
                 "business_logic:\n  flows:\n    - gated_step:\n        path: /c\n"
-                "      success_signal: [a]\n",
+                "      success_field: [a]\n",
             )
         )
 
