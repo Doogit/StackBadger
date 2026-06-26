@@ -149,11 +149,17 @@ def _get_paddle_webhook_secret(profile) -> str | None:
 
 
 @pytest.mark.paddle
-@pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
-@pytest.mark.cwe("345")  # insufficient verification of data authenticity
 class TestPaddleWebhookSignature:
-    """Probe Paddle webhook endpoint for signature enforcement weaknesses."""
+    """Probe Paddle webhook endpoint for signature enforcement weaknesses.
 
+    asvs/cwe tags are applied per method, not at the class level: the signature
+    probes map to V4.1.5 / CWE-345 (per-message authenticity), while the
+    stale-timestamp replay probe maps to V2.3.3 / CWE-294 (replay / idempotency),
+    so the coverage ledger does not count replay coverage as signature coverage.
+    """
+
+    @pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+    @pytest.mark.cwe("345")  # insufficient verification of data authenticity
     def test_missing_paddle_signature(self, profile, evidence):
         """POST with no Paddle-Signature header must be rejected (400 or 401).
 
@@ -192,6 +198,8 @@ class TestPaddleWebhookSignature:
             f"Expected 400/401/403 for missing Paddle-Signature; got {resp.status_code}"
         )
 
+    @pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+    @pytest.mark.cwe("345")  # insufficient verification of data authenticity
     def test_empty_paddle_signature(self, profile, evidence):
         """POST with empty Paddle-Signature header must be rejected."""
         if not _PADDLE_WEBHOOK_PATH:
@@ -228,6 +236,8 @@ class TestPaddleWebhookSignature:
             f"Expected rejection for empty Paddle-Signature; got {resp.status_code}"
         )
 
+    @pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+    @pytest.mark.cwe("345")  # insufficient verification of data authenticity
     def test_forged_paddle_signature(self, profile, evidence):
         """POST with a well-formed but HMAC-invalid Paddle-Signature must be rejected.
 
@@ -270,6 +280,8 @@ class TestPaddleWebhookSignature:
         )
 
     @pytest.mark.write_probe
+    @pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+    @pytest.mark.cwe("345")  # insufficient verification of data authenticity
     def test_body_signature_mismatch(self, profile, evidence):
         """Signature computed over original body but body modified before sending.
 
@@ -360,7 +372,8 @@ class TestPaddleWebhookSignature:
         )
 
     @pytest.mark.write_probe
-    @pytest.mark.cwe("294")  # capture-replay; complements the class-level CWE-345 authenticity tag
+    @pytest.mark.asvs("2.3.3")  # replay / business-logic idempotency (§P2-F), distinct from signature integrity
+    @pytest.mark.cwe("294")  # capture-replay
     def test_replay_stale_timestamp_rejected(self, profile, evidence):
         """A validly-signed event with a stale timestamp should not be reprocessed (replay window).
 
@@ -486,6 +499,8 @@ class TestPaddleWebhookSignature:
         # event are a robustness concern owned by test_unexpected_event_type.
         return
 
+    @pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+    @pytest.mark.cwe("345")  # insufficient verification of data authenticity
     def test_unexpected_event_type(self, profile, evidence):
         """Unexpected event_type with forged signature — robustness probe only.
 
@@ -538,6 +553,8 @@ class TestPaddleWebhookSignature:
             f"Expected signature rejection (400/401/403) for forged request; got {resp.status_code}"
         )
 
+    @pytest.mark.asvs("4.1.5")  # per-message digital signature on sensitive cross-system requests
+    @pytest.mark.cwe("345")  # insufficient verification of data authenticity
     def test_json_parsing_before_verification(self, profile, evidence):
         """Detect JSON-parsing-before-verification via pretty-print vs minified response diff.
 

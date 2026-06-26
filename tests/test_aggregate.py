@@ -389,6 +389,35 @@ def test_paddle_replay_override_resolves_through_class_qualified_nodeid():
     assert findings[0]["id"].startswith("WREPLAY-")
 
 
+def test_stripe_forged_replay_node_stays_webhook_spoofing():
+    """The Stripe forged-replay probe sends a FORGED signature (the harness has no
+    Stripe webhook secret), so a failure is a signature bypass, not a replay gap. It
+    deliberately stays in webhook_spoofing/HIGH rather than routing to
+    webhook_replay/MEDIUM like the valid-signature Paddle/LemonSqueezy replay probes:
+    routing it to webhook_replay would mislabel and downgrade a real signature bypass.
+    Lock that classification in so it is not "corrected" to webhook_replay by mistake.
+    """
+    pytest_data = {
+        "tests": [
+            {
+                "nodeid": (
+                    "tests/test_webhook_spoofing.py::"
+                    "test_stripe_webhook_forged_replay_rejected[POST:/webhook]"
+                ),
+                "outcome": "failed",
+                "call": {"longrepr": "Failed: webhook returned 200 for a forged stale signature ..."},
+            }
+        ]
+    }
+
+    findings = build_pytest_findings(pytest_data, {}, {}, {})
+
+    assert len(findings) == 1
+    assert findings[0]["category"] == "webhook_spoofing"
+    assert findings[0]["severity"] == "HIGH"
+    assert findings[0]["id"].startswith("HOOK-")
+
+
 def test_inline_high_escalation_from_frame_ancestors_pytest_fail():
     """The frame-ancestors probe self-escalates to HIGH via an inline 'HIGH:' in
     its pytest.fail() message when the page is framable by any origin. The MEDIUM
