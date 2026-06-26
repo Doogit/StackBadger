@@ -269,6 +269,10 @@ def test_phase1_modules_fully_wired_into_ledger(stem, category, severity, prefix
     "stem,category,severity,prefix",
     [
         ("test_mass_assignment", "mass_assignment", "HIGH", "MASS"),
+        # §P2-G business-logic: file-stem MEDIUM (per-user quota gap, CWE-799); the
+        # step-sequence bypass self-escalates HIGH inline (CWE-841), covered by the
+        # e2e escalation test below.
+        ("test_business_logic", "business_logic", "MEDIUM", "BIZLOG"),
     ],
 )
 def test_phase2_modules_fully_wired_into_ledger(stem, category, severity, prefix):
@@ -446,6 +450,67 @@ def test_inline_high_escalation_from_frame_ancestors_pytest_fail():
         "stale timestamp ..."
     )
     assert _extract_severity_from_message(paddle_replay_longrepr) == "MEDIUM"
+
+
+def test_business_logic_step_sequence_escalates_to_high():
+    """The §P2-G step-sequence probe lives in test_business_logic.py (file-stem
+    MEDIUM) but self-escalates to HIGH via an inline 'HIGH:' in its pytest.fail()
+    message when a gated step is accepted out of order (CWE-841). Drive the real
+    aggregator pipeline to prove the longrepr lifts the finding above the MEDIUM
+    default; without this a true step-sequence bypass would report MEDIUM and not
+    fire the run.sh exit-1 gate.
+    """
+    pytest_data = {
+        "tests": [
+            {
+                "nodeid": (
+                    "tests/test_business_logic.py::"
+                    "test_gated_steps_reject_out_of_order_requests"
+                ),
+                "outcome": "failed",
+                "call": {
+                    "longrepr": (
+                        "Failed: HIGH: gated step(s) accepted out of order — the flow "
+                        "does not enforce step sequence ..."
+                    )
+                },
+            }
+        ]
+    }
+
+    findings = build_pytest_findings(pytest_data, {}, {}, {})
+
+    assert len(findings) == 1
+    assert findings[0]["category"] == "business_logic"
+    assert findings[0]["severity"] == "HIGH"
+    assert findings[0]["id"].startswith("BIZLOG-")
+
+
+def test_business_logic_quota_node_stays_medium():
+    """The §P2-G per-user-quota probe (same module) emits no inline severity
+    keyword, so an absent-quota failure must resolve to the file-stem MEDIUM and
+    the business_logic category — not silently fall back to api_surface. A MEDIUM
+    quota finding must keep a MEDIUM-only run at exit 2, never flip it to exit 1.
+    """
+    pytest_data = {
+        "tests": [
+            {
+                "nodeid": (
+                    "tests/test_business_logic.py::"
+                    "test_authenticated_endpoint_enforces_per_user_quota"
+                ),
+                "outcome": "failed",
+                "call": {"longrepr": "Failed: per-user quota appears absent: 60 ..."},
+            }
+        ]
+    }
+
+    findings = build_pytest_findings(pytest_data, {}, {}, {})
+
+    assert len(findings) == 1
+    assert findings[0]["category"] == "business_logic"
+    assert findings[0]["severity"] == "MEDIUM"
+    assert findings[0]["id"].startswith("BIZLOG-")
 
 
 def test_pytest_finding_override_resolves_through_parametrize_suffix():
