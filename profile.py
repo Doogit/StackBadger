@@ -248,6 +248,124 @@ def _validate_oauth_block(data: dict[str, Any]) -> None:
                 )
 
 
+def _validate_step(step: Any, ctx: str) -> None:
+    """Validate a ``{path, method, probe_body}`` step mapping (``path`` required).
+
+    Shared by the ``business_logic`` flow/quota validators. ``method`` and
+    ``probe_body`` are optional but type-checked when present so a misconfigured
+    step fails at load time rather than a probe silently misreading it.
+    """
+    if not isinstance(step, dict) or not isinstance(step.get("path"), str):
+        raise ValueError(f"'{ctx}' must be a mapping with a string 'path' field")
+    method = step.get("method")
+    if method is not None and not isinstance(method, str):
+        raise ValueError(
+            f"'{ctx}.method' must be a string when present, got {type(method).__name__}"
+        )
+    probe_body = step.get("probe_body")
+    if probe_body is not None and not isinstance(probe_body, dict):
+        raise ValueError(
+            f"'{ctx}.probe_body' must be a mapping when present, got "
+            f"{type(probe_body).__name__}"
+        )
+
+
+def _validate_status_list(value: Any, ctx: str) -> None:
+    """Validate an optional list-of-HTTP-status-codes field (ints, not bools)."""
+    if value is None:
+        return
+    if not isinstance(value, list) or not all(
+        isinstance(s, int) and not isinstance(s, bool) for s in value
+    ):
+        raise ValueError(f"'{ctx}' must be a list of integer status codes, got {value!r}")
+
+
+def _validate_business_logic_block(data: dict[str, Any]) -> None:
+    """Validate the optional ``business_logic`` block shape (§P2-G probes).
+
+    Schema (every field optional — the business-logic probes skip cleanly when a
+    section is absent; a present field must have the right type or a probe would
+    misread it):
+
+        business_logic:
+          flows:                        # step-sequence enforcement (V2.3.1 / CWE-841)
+            - name: <str>               # optional label shown in the report
+              gated_step:               # the step that MUST reject when called out of order
+                path: <str>             # required (root-relative or absolute)
+                method: <str>           # optional, defaults POST
+                probe_body: <map>       # optional request body
+              reject_statuses: [<int>]  # optional; statuses that count as a correct rejection
+              success_signal: <str>     # optional; substring proving the gated action ran
+          quota:                        # per-user quota / anti-automation (V2.4.1 / CWE-799)
+            endpoint:
+              path: <str>               # required
+              method: <str>             # optional, defaults POST
+              probe_body: <map>         # optional
+            burst: <int>                # optional; number of requests to send (>=1)
+            limit_statuses: [<int>]     # optional; statuses that indicate the quota fired
+
+    A flow's ``gated_step`` and the quota ``endpoint`` are required *within* their
+    block (a flow with no gated step, or a quota with no endpoint, cannot drive a
+    probe). Raises ``ValueError`` on any shape error, mirroring
+    ``_validate_oauth_block`` — a malformed profile fails loudly at load rather
+    than a probe silently skipping and overstating coverage.
+    """
+    bl = data.get("business_logic")
+    if bl is None:
+        return
+    if not isinstance(bl, dict):
+        raise ValueError(
+            f"Profile field 'business_logic' must be a mapping, got {type(bl).__name__}"
+        )
+
+    flows = bl.get("flows")
+    if flows is not None:
+        if not isinstance(flows, list):
+            raise ValueError(
+                "Profile field 'business_logic.flows' must be a list of flow "
+                f"mappings, got {type(flows).__name__}"
+            )
+        for flow in flows:
+            if not isinstance(flow, dict):
+                raise ValueError("Each entry in 'business_logic.flows' must be a mapping")
+            _validate_step(flow.get("gated_step"), "business_logic.flows[].gated_step")
+            name = flow.get("name")
+            if name is not None and not isinstance(name, str):
+                raise ValueError(
+                    "'business_logic.flows[].name' must be a string when present, "
+                    f"got {type(name).__name__}"
+                )
+            signal = flow.get("success_signal")
+            if signal is not None and not isinstance(signal, str):
+                raise ValueError(
+                    "'business_logic.flows[].success_signal' must be a string when "
+                    f"present, got {type(signal).__name__}"
+                )
+            _validate_status_list(
+                flow.get("reject_statuses"), "business_logic.flows[].reject_statuses"
+            )
+
+    quota = bl.get("quota")
+    if quota is not None:
+        if not isinstance(quota, dict):
+            raise ValueError(
+                "Profile field 'business_logic.quota' must be a mapping, got "
+                f"{type(quota).__name__}"
+            )
+        _validate_step(quota.get("endpoint"), "business_logic.quota.endpoint")
+        burst = quota.get("burst")
+        if burst is not None and (
+            not isinstance(burst, int) or isinstance(burst, bool) or burst < 1
+        ):
+            raise ValueError(
+                f"'business_logic.quota.burst' must be a positive integer when "
+                f"present, got {burst!r}"
+            )
+        _validate_status_list(
+            quota.get("limit_statuses"), "business_logic.quota.limit_statuses"
+        )
+
+
 def load_profile(path: str | Path) -> Profile:
     """Parse a YAML profile file and return a :class:`Profile` object.
 
@@ -314,6 +432,12 @@ def load_profile(path: str | Path) -> Profile:
     # probes skip cleanly when fields are absent, so every field is optional, but
     # a present field must have the right type or a probe would misread it.
     _validate_oauth_block(data)
+
+    # Validate the optional business_logic block (§P2-G step-sequence + per-user
+    # quota probes). Shape only — the probes skip cleanly when a section is
+    # absent, but a present field must be correctly typed or a probe would
+    # misread it and silently skip.
+    _validate_business_logic_block(data)
 
     # Warn if source_file_map references endpoints not declared in the profile.
     import warnings as _warnings

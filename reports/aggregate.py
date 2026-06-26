@@ -72,6 +72,7 @@ TEST_SEVERITY_MAP: dict[str, str] = {
     "test_data_protection": "MEDIUM",         # no-store is MEDIUM; token-in-URL self-escalates to HIGH inline
     "test_oauth_flow": "HIGH",                # token leakage / missing state+PKCE are HIGH; scope/nonce overridden MEDIUM
     "test_mass_assignment": "HIGH",           # persisted privileged field = privilege escalation (CWE-915)
+    "test_business_logic": "MEDIUM",          # quota gap is MEDIUM (CWE-799); step-sequence bypass self-escalates HIGH inline (CWE-841)
 }
 
 # Per-test severity overrides (test function name → severity).
@@ -200,6 +201,7 @@ TEST_CATEGORY_MAP: dict[str, str] = {
     "test_data_protection": "data_protection",
     "test_oauth_flow": "oauth",
     "test_mass_assignment": "mass_assignment",
+    "test_business_logic": "business_logic",
 }
 
 # ZAP alert name → endpoint path heuristic
@@ -266,6 +268,7 @@ _CATEGORY_PREFIXES: dict[str, str] = {
     "file_serve": "FSERVE",
     "password_policy": "PWPOL",
     "user_enumeration": "ENUM",
+    "business_logic": "BIZLOG",
 }
 
 # Provider layer categories (direct-API tests, not app endpoints)
@@ -585,6 +588,16 @@ def _remediation_for_category(category: str, severity: str, stack_info: dict) ->
             "request carries the appropriate custom claim. Strip or reject unknown "
             "keys at the API boundary."
         ),
+        "business_logic": (
+            "Enforce multi-step flows server-side: before processing a gated step, "
+            "verify that its prerequisite state exists for the current user (a "
+            "persisted cart, a confirmed payment, a completed verification) and "
+            "reject out-of-order calls with 409/422 rather than acting on them. "
+            "Enforce per-user quotas in a durable server-side store keyed by user "
+            "id (not client state or a header), decrement atomically, and return "
+            "429 (or 402 for a plan limit) once the quota is exhausted so a single "
+            "account cannot consume the resource without bound."
+        ),
         "method_hardening": (
             "Disable the HTTP TRACE (and TRACK) method at the web server, CDN, or "
             "function gateway. Allow only the methods each route needs (typically "
@@ -692,6 +705,7 @@ def _root_cause_for_category(category: str) -> str:
         "data_protection": "Sensitive responses are cacheable (missing Cache-Control: no-store) or tokens/PII are exposed in URLs, query strings, or redirect Location headers.",
         "oauth": "OAuth client flow omits a CSRF state, PKCE code_challenge, or OIDC nonce, requests excessive scopes, or serialises delegated-send tokens to the browser instead of holding them server-side.",
         "mass_assignment": "The write handler binds client-supplied fields onto the stored object instead of allow-listing writable columns, so a privileged field (role, is_admin, balance) included in the payload is persisted.",
+        "business_logic": "A gated step in a multi-step flow is processed without verifying its prerequisite step ran, or a resource has no durable per-user quota, so the workflow order can be skipped or a single user can consume the resource without bound.",
         "method_hardening": "The server honors the HTTP TRACE method, echoing the request back to the client (Cross-Site Tracing) and signalling a permissive method configuration.",
         "csrf": "A state-changing endpoint authenticated by an ambient cookie session does not verify request origin or an anti-CSRF token, so a forged cross-site request carrying the victim's session cookie is accepted.",
         "frame_ancestors": "The Content-Security-Policy lacks a restrictive frame-ancestors directive, so framing is controlled (if at all) only by the legacy X-Frame-Options header.",
@@ -816,6 +830,14 @@ def _why_it_matters_for_category(category: str) -> str:
             "own privileges, grant itself paid entitlements, or tamper with "
             "balances directly from a write payload, with no other vulnerability "
             "required."
+        ),
+        "business_logic": (
+            "Skipping a step in a business flow lets an attacker reach the gated "
+            "action without its prerequisite — confirming an order without paying, "
+            "granting access without verification, or finalising a record before "
+            "approval. A missing per-user quota lets one account exhaust a costly "
+            "resource (generation jobs, emails, API credits), driving cost, fraud, "
+            "or denial of service for everyone else."
         ),
         "method_hardening": (
             "An enabled TRACE method can be abused for Cross-Site Tracing: with a "
