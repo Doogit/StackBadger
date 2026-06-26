@@ -17,7 +17,12 @@ from typing import Any
 
 from discover import discover_live
 from exclusions import effective_exclude_paths, effective_exclude_tables
-from profile import Profile, load_profile, _validate_oauth_block
+from profile import (
+    Profile,
+    load_profile,
+    _validate_business_logic_block,
+    _validate_oauth_block,
+)
 from providers import ProviderManifest
 
 # Default stack used for the canonical black-box target (Clerk + Supabase + Stripe) and
@@ -236,6 +241,13 @@ def assemble_profile(
     # validated the YAML layer, but the env-override merge above can introduce
     # oauth fields, so re-check the merged shape before any probe reads it.
     _validate_oauth_block(data)
+
+    # Re-validate business_logic on the assembled dict too, mirroring the oauth
+    # re-check above. No env override introduces it today (so this is currently a
+    # no-op beyond the YAML-layer load_profile check), but keeping the assembler
+    # symmetric means a future env/discovery source for business_logic still fails
+    # loud here rather than letting a malformed block reach a probe and skip.
+    _validate_business_logic_block(data)
 
     # Validate minimum required fields.
     target = data.get("target")

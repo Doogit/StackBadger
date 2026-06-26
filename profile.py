@@ -291,7 +291,7 @@ def _validate_business_logic_block(data: dict[str, Any]) -> None:
           flows:                        # step-sequence enforcement (V2.3.1 / CWE-841)
             - name: <str>               # optional label shown in the report
               gated_step:               # the step that MUST reject when called out of order
-                path: <str>             # required (root-relative or absolute)
+                path: <str>             # required (root-relative, e.g. /checkout/confirm)
                 method: <str>           # optional, defaults POST
                 probe_body: <map>       # optional request body
               reject_statuses: [<int>]  # optional; statuses that count as a correct rejection
@@ -301,7 +301,7 @@ def _validate_business_logic_block(data: dict[str, Any]) -> None:
               path: <str>               # required
               method: <str>             # optional, defaults POST
               probe_body: <map>         # optional
-            burst: <int>                # optional; number of requests to send (>=1)
+            burst: <int>                # optional; number of requests to send (>=2)
             limit_statuses: [<int>]     # optional; statuses that indicate the quota fired
 
     A flow's ``gated_step`` and the quota ``endpoint`` are required *within* their
@@ -355,11 +355,14 @@ def _validate_business_logic_block(data: dict[str, Any]) -> None:
         _validate_step(quota.get("endpoint"), "business_logic.quota.endpoint")
         burst = quota.get("burst")
         if burst is not None and (
-            not isinstance(burst, int) or isinstance(burst, bool) or burst < 1
+            not isinstance(burst, int) or isinstance(burst, bool) or burst < 2
         ):
+            # >= 2: a single request can never observe a per-user limit (the
+            # control only shows as the Nth+1 rejection), so burst=1 would always
+            # mis-read as 'quota absent'.
             raise ValueError(
-                f"'business_logic.quota.burst' must be a positive integer when "
-                f"present, got {burst!r}"
+                f"'business_logic.quota.burst' must be an integer >= 2 when present "
+                f"(a single request cannot observe a quota), got {burst!r}"
             )
         _validate_status_list(
             quota.get("limit_statuses"), "business_logic.quota.limit_statuses"

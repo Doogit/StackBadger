@@ -37,8 +37,14 @@ pass/fail (a standing project gate). A bare 2xx on a gated step cannot, by
 itself, distinguish a real out-of-order execution from a no-op success, so the
 step-sequence probe only flags a HIGH bypass when an operator-declared
 ``success_signal`` confirms the action ran; without it a 2xx is indeterminate
-and the probe skips rather than emitting a false HIGH. The classifiers are pure
-and unit-tested offline at the bottom of this module.
+and the probe skips rather than emitting a false HIGH. The ``success_signal``
+must be a token that appears ONLY on genuine completion (e.g. a created resource
+id), never a generic field name a 2xx error envelope could also echo
+(``{"error": "order_id required"}`` would otherwise misfire) — a poorly chosen
+signal yields a false HIGH. A 2xx whose body lacks the signal is treated as
+indeterminate (``noop``), NOT as observed enforcement: only a real rejection
+(4xx) proves the control held. The classifiers are pure and unit-tested offline
+at the bottom of this module.
 
 Safety
 ------
@@ -113,9 +119,11 @@ def _step_sequence_verdict(
       - ``"enforced"``    — the step was rejected (status in *reject_statuses*).
       - ``"bypassed"``    — a 2xx AND *success_signal* is present in the body, so
                             the gated action demonstrably ran out of order.
-      - ``"noop"``        — a 2xx but *success_signal* is configured and ABSENT,
-                            so the endpoint accepted the call without performing
-                            the action (the control effectively held).
+      - ``"noop"``        — a 2xx but *success_signal* is configured and ABSENT:
+                            either the endpoint no-op'd (control held) OR the
+                            action ran without echoing the signal. Ambiguous, so
+                            the probe treats it as indeterminate — NOT as observed
+                            enforcement (only a 4xx rejection proves that).
       - ``"inconclusive"``— a 2xx with no *success_signal* to disambiguate, or any
                             other status (3xx/404/405/5xx/0) that proves neither
                             enforcement nor bypass.
@@ -165,16 +173,6 @@ def _business_logic_cfg(profile) -> dict:
     return bl if isinstance(bl, dict) else {}
 
 
-def _flows(profile) -> list[dict]:
-    flows = _business_logic_cfg(profile).get("flows")
-    return [f for f in flows if isinstance(f, dict)] if isinstance(flows, list) else []
-
-
-def _quota_cfg(profile) -> dict:
-    quota = _business_logic_cfg(profile).get("quota")
-    return quota if isinstance(quota, dict) else {}
-
-
 def _strip_query(url: str) -> str:
     """Drop query + fragment so a captured URL never persists a token/PII."""
     parts = urlsplit(url)
@@ -206,13 +204,17 @@ def test_gated_steps_reject_out_of_order_requests(profile, user_a_client, eviden
     out of order (a bypass — self-escalated to HIGH via ``pytest.fail("HIGH:")``
     above the module's MEDIUM default).
 
-    A 2xx with no ``success_signal`` configured is INDETERMINATE (a no-op success
-    cannot be told apart from real out-of-order processing), so the probe records
-    it and — if no flow produced an observable enforced/bypassed verdict — skips
-    rather than emitting a false pass or a false HIGH. Skips cleanly when the
-    profile declares no flows.
+    Only a real 4xx rejection counts as observed enforcement. A 2xx whose body
+    lacks the signal (or any 2xx with no ``success_signal`` configured) is
+    INDETERMINATE — a no-op success cannot be told apart from real out-of-order
+    processing — so the probe records it and, if no flow returned a clean
+    rejection, SKIPS rather than emitting a false pass or a false HIGH. Skips
+    cleanly when the profile declares no flows.
     """
-    flows = _flows(profile)
+    flows = [
+        f for f in (_business_logic_cfg(profile).get("flows") or [])
+        if isinstance(f, dict)
+    ]
     if not flows:
         pytest.skip(
             "No business_logic.flows declared in profile — no multi-step flow to "
@@ -260,19 +262,25 @@ def test_gated_steps_reject_out_of_order_requests(profile, user_a_client, eviden
 
         if verdict == "bypassed":
             bypassed.append(f"{name} ({method} {path}) returned {resp.status_code}")
-        elif verdict in ("enforced", "noop"):
-            held.append(f"{name} -> {resp.status_code} ({verdict})")
+        elif verdict == "enforced":
+            held.append(f"{name} -> {resp.status_code} (rejected out of order)")
+        elif verdict == "noop":
+            inconclusive.append(
+                f"{name} -> {resp.status_code} (2xx but success_signal absent — "
+                "no-op or signal misconfigured; enforcement not observable)"
+            )
         else:
             inconclusive.append(
-                f"{name} -> {resp.status_code} (indeterminate; declare success_signal "
-                "to disambiguate a no-op from out-of-order processing)"
+                f"{name} -> {resp.status_code} (indeterminate; a 2xx needs a "
+                "success_signal to classify, other statuses prove nothing)"
             )
 
     if bypassed:
         # Self-escalate to HIGH so the aggregator lifts above the MEDIUM default.
         pytest.fail(
-            "HIGH: gated step(s) accepted out of order — the flow does not enforce "
-            "step sequence: " + "; ".join(bypassed) + ". An attacker can skip a "
+            "HIGH: gated step(s) accepted out of order with the operator-declared "
+            "success_signal present in the response — the flow does not enforce step "
+            "sequence: " + "; ".join(bypassed) + ". An attacker can skip a "
             "prerequisite step (payment, verification, approval) and trigger the "
             "gated action directly (ASVS V2.3.1, CWE-841). Enforce server-side that "
             "each step's prerequisite state exists before processing."
@@ -280,11 +288,11 @@ def test_gated_steps_reject_out_of_order_requests(profile, user_a_client, eviden
 
     if not held:
         pytest.skip(
-            "No flow produced an observable enforced/bypassed verdict — all "
-            "indeterminate: " + "; ".join(inconclusive) + ". Declare a "
-            "success_signal on each flow so a 2xx response can be distinguished "
-            "between a no-op and out-of-order processing (no green pass where the "
-            "control is not observable)."
+            "No flow returned a clean rejection (4xx) of the out-of-order call, so "
+            "step-sequence enforcement was not observed: " + "; ".join(inconclusive)
+            + ". Declare an accurate success_signal (a token present only on genuine "
+            "completion) so a 2xx can be classified, rather than guessing a pass "
+            "(no green pass where the control is not observable)."
         )
 
 
@@ -307,8 +315,8 @@ def test_authenticated_endpoint_enforces_per_user_quota(profile, user_a_client, 
     401/500) is indeterminate and skips rather than guessing. Stops early on the
     first limit hit. Skips cleanly when the profile declares no quota target.
     """
-    quota = _quota_cfg(profile)
-    if not quota:
+    quota = _business_logic_cfg(profile).get("quota")
+    if not isinstance(quota, dict) or not quota:
         pytest.skip(
             "No business_logic.quota declared in profile — no per-user quota target "
             "to exercise (V2.4.1 / CWE-799). Declare business_logic.quota.endpoint "
@@ -348,6 +356,18 @@ def test_authenticated_endpoint_enforces_per_user_quota(profile, user_a_client, 
 
     if verdict == "limited":
         return  # a per-user quota / rate control is present
+
+    # A burst truncated by a transport error before any limit status is
+    # INDETERMINATE, not "quota absent": a server may defend a burst by dropping
+    # the connection, which would otherwise read as an all-2xx 'unlimited' run.
+    # Check this BEFORE the unlimited verdict so a cut-short burst never fails.
+    if transport_error:
+        pytest.skip(
+            f"Per-user quota indeterminate — transport error ({transport_error}) "
+            f"after {len(statuses)} request(s) with no limit status seen; the burst "
+            "was cut short before quota enforcement could be observed."
+        )
+
     if verdict == "unlimited":
         pytest.fail(
             f"per-user quota appears absent: {len(statuses)} authenticated {method} "
@@ -356,15 +376,11 @@ def test_authenticated_endpoint_enforces_per_user_quota(profile, user_a_client, 
             "V2.4.1, CWE-799). Enforce a durable server-side per-user quota."
         )
 
-    detail = (
-        f"transport error ({transport_error}) after {len(statuses)} request(s)"
-        if transport_error
-        else f"no success/limit verdict from statuses {statuses[-10:]}"
-    )
     pytest.skip(
-        f"Per-user quota indeterminate — {detail}. The endpoint returned neither a "
-        "clean success run nor a quota/limit status, so quota enforcement cannot be "
-        "observed (no green pass where the control is not observable)."
+        f"Per-user quota indeterminate — no success/limit verdict from statuses "
+        f"{statuses[-10:]}. The endpoint returned neither a clean success run nor a "
+        "quota/limit status, so quota enforcement cannot be observed (no green pass "
+        "where the control is not observable)."
     )
 
 
@@ -387,7 +403,13 @@ def test_authenticated_endpoint_enforces_per_user_quota(profile, user_a_client, 
         (200, "order_id: 42 confirmed", "order_id", "bypassed"),
         (201, "Created resource", "created", "bypassed"),
         (200, "CONFIRMED", "confirmed", "bypassed"),  # case-insensitive
-        # 2xx + success_signal configured but ABSENT -> no-op (control held).
+        # KNOWN LIMITATION (pinned): a 2xx ERROR envelope that echoes the signal
+        # substring classifies "bypassed" -> false HIGH. This is why the module
+        # docstring requires success_signal to be a token present ONLY on genuine
+        # completion (a created id), never a generic field name an error can echo.
+        (200, "Error: order_id is required — cannot confirm", "order_id", "bypassed"),
+        # 2xx + success_signal configured but ABSENT -> noop (indeterminate: the
+        # probe does NOT count this as observed enforcement; only a 4xx does).
         (200, "nothing was processed", "order_id", "noop"),
         # 2xx with no success_signal -> indeterminate (cannot disambiguate).
         (200, "ok", None, "inconclusive"),
