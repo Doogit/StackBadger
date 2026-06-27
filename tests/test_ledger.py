@@ -83,6 +83,8 @@ def test_extract_marker_sidecar_aggregates_stacked_ids_and_filters_untagged():
             "tests/test_d.py::test_four",
             asvs=[_FakeMarker("8.2.3"), _FakeMarker("8.2.3")],
         ),
+        # cwe-only node -> kept with asvs=[] (mirror of the asvs-only node above).
+        _FakeItem("tests/test_e.py::test_five", cwe=[_FakeMarker("79")]),
     ]
 
     sidecar = extract_marker_sidecar(items)
@@ -91,6 +93,7 @@ def test_extract_marker_sidecar_aggregates_stacked_ids_and_filters_untagged():
         "tests/test_a.py::test_one": {"asvs": ["2.3.1"], "cwe": ["841"]},
         "tests/test_b.py::test_two": {"asvs": ["1.3.6", "15.3.2"], "cwe": ["918"]},
         "tests/test_d.py::test_four": {"asvs": ["8.2.3"], "cwe": []},
+        "tests/test_e.py::test_five": {"asvs": [], "cwe": ["79"]},
     }
 
 
@@ -220,3 +223,31 @@ def test_main_missing_sidecar_returns_infra_error(tmp_path):
     report = tmp_path / "report.json"
     report.write_text(json.dumps({"tests": []}), encoding="utf-8")
     assert main(["--pytest-report", str(report)]) == 3
+
+
+def test_main_missing_pytest_report_returns_infra_error(tmp_path):
+    assert main(["--pytest-report", str(tmp_path / "nope.json")]) == 3
+
+
+def test_main_corrupt_pytest_report_returns_infra_error(tmp_path):
+    report = tmp_path / "report.json"
+    report.write_text("{ not json", encoding="utf-8")
+    assert main(["--pytest-report", str(report)]) == 3
+
+
+def test_main_corrupt_sidecar_returns_infra_error(tmp_path):
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"tests": []}), encoding="utf-8")
+    sidecar_path_for(report).write_text("{ not json", encoding="utf-8")
+    assert main(["--pytest-report", str(report)]) == 3
+
+
+def test_main_unwritable_output_returns_infra_error(tmp_path):
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"tests": []}), encoding="utf-8")
+    write_sidecar({"t::s": {"asvs": ["2.3.1"], "cwe": []}}, sidecar_path_for(report))
+    # A file where the output's parent dir should be -> mkdir/write raises OSError.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x", encoding="utf-8")
+    out = blocker / "ledger.json"
+    assert main(["--pytest-report", str(report), "--output", str(out)]) == 3

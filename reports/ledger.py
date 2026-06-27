@@ -158,9 +158,15 @@ def _rollup(node_ids: list[str], outcomes: dict[str, str]) -> dict[str, Any]:
 
     A control is ``covered`` only when a tagged probe actually ran: a failing
     run means the control was exercised and the target failed it (a finding),
-    a passing run means exercised and passed. If every tagged probe skipped the
-    control is ``skipped`` (NOT coverage). ``not_run`` means a tagged node had
-    no outcome in the report (e.g. deselected).
+    a passing run means exercised and passed. ``covered_passing`` therefore
+    means at least one tagged node passed and none failed -- some nodes may
+    still have skipped (provider/config absent), so the per-control counts keep
+    the skip visible rather than the status implying every node ran. If *every*
+    tagged probe skipped, the control is ``skipped`` (NOT coverage). ``not_run``
+    means a tagged node is in the sidecar but has no outcome in the report (e.g.
+    the run was interrupted before reaching it, or report and sidecar are from
+    different runs). The harness uses no xfail/xpass markers, so any outcome
+    other than passed/failed/error/skipped buckets as ``not_run``.
     """
     counts = {"passed": 0, "failed": 0, "skipped": 0, "not_run": 0}
     for node_id in node_ids:
@@ -235,7 +241,7 @@ _STATUS_LABELS = {
     "covered_passing": "covered (passing)",
     "covered_failing": "covered (FINDING)",
     "skipped": "skipped (not coverage)",
-    "not_run": "not run (deselected)",
+    "not_run": "not run (absent from report)",
 }
 
 
@@ -314,8 +320,14 @@ def main(argv: list[str] | None = None) -> int:
     ledger["generated_at"] = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(ledger, indent=2, ensure_ascii=False), encoding="utf-8")
+        try:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(
+                json.dumps(ledger, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError as exc:
+            print(f"[error] Could not write ledger to {args.output}: {exc}", file=sys.stderr)
+            return 3
         print(f"[done] Coverage ledger -> {args.output}", file=sys.stderr)
 
     print(render_summary(ledger))
