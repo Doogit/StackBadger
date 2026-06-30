@@ -226,12 +226,17 @@ def test_main_missing_sidecar_returns_infra_error(tmp_path):
 
 
 def test_main_missing_pytest_report_returns_infra_error(tmp_path):
-    assert main(["--pytest-report", str(tmp_path / "nope.json")]) == 3
+    # Valid sidecar present so exit 3 can only come from the report-load branch
+    # (report is loaded before the sidecar), not the missing-sidecar branch.
+    report = tmp_path / "nope.json"  # never created
+    write_sidecar({"t::s": {"asvs": ["2.3.1"], "cwe": []}}, sidecar_path_for(report))
+    assert main(["--pytest-report", str(report)]) == 3
 
 
 def test_main_corrupt_pytest_report_returns_infra_error(tmp_path):
     report = tmp_path / "report.json"
     report.write_text("{ not json", encoding="utf-8")
+    write_sidecar({"t::s": {"asvs": ["2.3.1"], "cwe": []}}, sidecar_path_for(report))
     assert main(["--pytest-report", str(report)]) == 3
 
 

@@ -28,7 +28,8 @@ uses to write it, so the two agree without any env coordination.
 
 Exit codes:
   0 — ledger emitted
-  3 — infrastructure error (missing/unparseable pytest report or sidecar)
+  3 — infrastructure error (missing/unparseable pytest report or sidecar, or
+      the --output file could not be written)
 """
 
 from __future__ import annotations
