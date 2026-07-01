@@ -119,6 +119,21 @@ def test_outcomes_from_pytest_tolerates_null_tests_field():
     assert outcomes_from_pytest({"tests": None}) == {}
 
 
+def test_outcomes_from_pytest_skips_non_dict_entries():
+    # A malformed list entry (a bare string, not a test object) is skipped, not
+    # crashed on (str has no .get).
+    data = {"tests": ["garbage", {"nodeid": "t::a", "outcome": "passed"}]}
+    assert outcomes_from_pytest(data) == {"t::a": "passed"}
+
+
+def test_outcomes_from_pytest_skips_non_string_nodeid():
+    # A dict entry whose nodeid is an unhashable non-string (e.g. a list) must be
+    # skipped, not used as a dict key (which would raise TypeError).
+    data = {"tests": [{"nodeid": [], "outcome": "passed"},
+                      {"nodeid": "t::a", "outcome": "passed"}]}
+    assert outcomes_from_pytest(data) == {"t::a": "passed"}
+
+
 # ---------------------------------------------------------------------------
 # build_coverage_ledger
 # ---------------------------------------------------------------------------
@@ -143,6 +158,7 @@ def test_build_coverage_ledger_classifies_each_status():
     assert ledger["summary"]["asvs"] == {
         "covered_passing": 1,
         "covered_failing": 1,
+        "incomplete": 0,
         "skipped": 1,
         "not_run": 1,
     }
@@ -178,6 +194,50 @@ def test_control_with_passing_and_skipped_nodes_is_covered_passing():
     assert entry["status"] == "covered_passing"
     assert entry["passed"] == 1 and entry["skipped"] == 1
     assert entry["total"] == 2
+
+
+def test_control_with_passing_and_not_run_nodes_is_incomplete():
+    # Fail closed: a control spread across probes where one passes but a sibling
+    # never ran (interrupted run / stale sidecar) must NOT count as covered.
+    sidecar = {
+        "t::ran": {"asvs": ["8.2.1"], "cwe": []},
+        "t::absent": {"asvs": ["8.2.1"], "cwe": []},
+    }
+    outcomes = {"t::ran": "passed"}  # t::absent has no outcome -> not_run
+
+    entry = build_coverage_ledger(sidecar, outcomes)["asvs"]["8.2.1"]
+
+    assert entry["status"] == "incomplete"
+    assert entry["passed"] == 1 and entry["not_run"] == 1
+    assert entry["total"] == 2
+
+
+def test_control_with_failing_and_not_run_nodes_is_incomplete():
+    # A failure among the ran probes is still surfaced by reports/aggregate.py;
+    # in the coverage ledger the not_run sibling makes the evidence incomplete.
+    sidecar = {
+        "t::ran": {"asvs": ["8.2.1"], "cwe": []},
+        "t::absent": {"asvs": ["8.2.1"], "cwe": []},
+    }
+    outcomes = {"t::ran": "failed"}
+
+    entry = build_coverage_ledger(sidecar, outcomes)["asvs"]["8.2.1"]
+
+    assert entry["status"] == "incomplete"
+    assert entry["failed"] == 1 and entry["not_run"] == 1
+
+
+def test_control_with_all_nodes_absent_is_not_run_not_incomplete():
+    # Distinguish "partially ran" (incomplete) from "nothing ran" (not_run):
+    # incomplete requires at least one node to have actually produced an outcome.
+    sidecar = {
+        "t::a": {"asvs": ["8.2.1"], "cwe": []},
+        "t::b": {"asvs": ["8.2.1"], "cwe": []},
+    }
+    entry = build_coverage_ledger(sidecar, {})["asvs"]["8.2.1"]
+
+    assert entry["status"] == "not_run"
+    assert entry["not_run"] == 2
 
 
 def test_error_outcome_counts_as_failing():
@@ -241,6 +301,19 @@ def test_render_summary_contains_axis_titles_and_status_labels():
     assert "pass=0 fail=0 skip=1 n/a=0" in text
 
 
+def test_render_summary_shows_incomplete_control():
+    # A live incomplete control (one probe ran, one absent) renders with the new
+    # label and its counts, not just as a zero in the summary block.
+    sidecar = {
+        "t::ran": {"asvs": ["8.2.1"], "cwe": []},
+        "t::absent": {"asvs": ["8.2.1"], "cwe": []},
+    }
+    text = render_summary(build_coverage_ledger(sidecar, {"t::ran": "passed"}))
+    assert "incomplete (partial run)" in text
+    assert "8.2.1" in text
+    assert "pass=1 fail=0 skip=0 n/a=1" in text
+
+
 # ---------------------------------------------------------------------------
 # write/load + CLI
 # ---------------------------------------------------------------------------
@@ -297,6 +370,70 @@ def test_main_corrupt_sidecar_returns_infra_error(tmp_path):
     report.write_text(json.dumps({"tests": []}), encoding="utf-8")
     sidecar_path_for(report).write_text("{ not json", encoding="utf-8")
     assert main(["--pytest-report", str(report)]) == 3
+
+
+def test_main_non_dict_pytest_report_returns_infra_error(tmp_path):
+    # Valid JSON, wrong shape: a top-level list ([]) would hit .get() and raise
+    # AttributeError past the load guards -> must map to exit 3, not a crash.
+    report = tmp_path / "report.json"
+    report.write_text("[]", encoding="utf-8")
+    write_sidecar({"t::s": {"asvs": ["2.3.1"], "cwe": []}}, sidecar_path_for(report))
+    assert main(["--pytest-report", str(report)]) == 3
+
+
+def test_main_non_dict_sidecar_returns_infra_error(tmp_path):
+    # A top-level list sidecar would hit .items() and raise AttributeError.
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"tests": []}), encoding="utf-8")
+    sidecar_path_for(report).write_text("[]", encoding="utf-8")
+    assert main(["--pytest-report", str(report)]) == 3
+
+
+def test_main_non_list_tests_field_returns_infra_error(tmp_path):
+    # "tests" present but not a list (a dict) is a malformed report -> exit 3.
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"tests": {"nope": 1}}), encoding="utf-8")
+    write_sidecar({"t::s": {"asvs": ["2.3.1"], "cwe": []}}, sidecar_path_for(report))
+    assert main(["--pytest-report", str(report)]) == 3
+
+
+def test_main_non_dict_sidecar_entry_returns_infra_error(tmp_path):
+    # A sidecar that is a dict but whose entry value is not an object ([]) would
+    # hit tags.get(...) in build_coverage_ledger -> must be caught as exit 3.
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"tests": []}), encoding="utf-8")
+    sidecar_path_for(report).write_text(json.dumps({"t::x": []}), encoding="utf-8")
+    assert main(["--pytest-report", str(report)]) == 3
+
+
+def test_main_non_list_tag_values_in_sidecar_returns_infra_error(tmp_path):
+    # A sidecar entry whose 'asvs' is a bare string, not a list, is malformed.
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"tests": []}), encoding="utf-8")
+    sidecar_path_for(report).write_text(
+        json.dumps({"t::x": {"asvs": "2.3.1", "cwe": []}}), encoding="utf-8"
+    )
+    assert main(["--pytest-report", str(report)]) == 3
+
+
+def test_main_non_string_tag_element_returns_infra_error(tmp_path):
+    # 'asvs' is a list (passes the container check) but holds a non-string,
+    # unhashable element; must be caught as exit 3, not crash in the rollup.
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"tests": []}), encoding="utf-8")
+    sidecar_path_for(report).write_text(
+        json.dumps({"t::x": {"asvs": [[]], "cwe": []}}), encoding="utf-8"
+    )
+    assert main(["--pytest-report", str(report)]) == 3
+
+
+def test_build_coverage_ledger_skips_non_string_tag_elements():
+    # Direct-caller safety: build itself never raises on a non-string id, it
+    # skips it (the CLI rejects the same shape loudly via _sidecar_entry_ok).
+    ledger = build_coverage_ledger(
+        {"t::x": {"asvs": [[], "2.3.1"], "cwe": []}}, {}
+    )
+    assert list(ledger["asvs"].keys()) == ["2.3.1"]
 
 
 def test_main_unwritable_output_returns_infra_error(tmp_path):

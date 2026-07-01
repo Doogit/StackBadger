@@ -28,8 +28,9 @@ uses to write it, so the two agree without any env coordination.
 
 Exit codes:
   0 — ledger emitted
-  3 — infrastructure error (missing/unparseable pytest report or sidecar, or
-      the --output file could not be written)
+  3 — infrastructure error (a pytest report or sidecar that is missing,
+      unparseable, or the wrong JSON shape, or an --output file that could
+      not be written)
 """
 
 from __future__ import annotations
@@ -129,9 +130,11 @@ def outcomes_from_pytest(pytest_data: dict) -> dict[str, str]:
     """Map every reported test node id to its outcome (passed/failed/skipped/...)."""
     outcomes: dict[str, str] = {}
     for test in pytest_data.get("tests") or []:
+        if not isinstance(test, dict):
+            continue  # skip a malformed (non-object) entry rather than crash
         node_id = test.get("nodeid")
-        if node_id:
-            outcomes[node_id] = test.get("outcome", "")
+        if isinstance(node_id, str) and node_id:  # str guard: a non-str id (e.g.
+            outcomes[node_id] = test.get("outcome", "")  # a list) is unhashable
     return outcomes
 
 
@@ -157,17 +160,29 @@ def _natural_key(control_id: str) -> tuple:
 def _rollup(node_ids: list[str], outcomes: dict[str, str]) -> dict[str, Any]:
     """Roll a control's tagged nodes up into counts + a single coverage status.
 
-    A control is ``covered`` only when a tagged probe actually ran: a failing
-    run means the control was exercised and the target failed it (a finding),
-    a passing run means exercised and passed. ``covered_passing`` therefore
-    means at least one tagged node passed and none failed -- some nodes may
-    still have skipped (provider/config absent), so the per-control counts keep
-    the skip visible rather than the status implying every node ran. If *every*
-    tagged probe skipped, the control is ``skipped`` (NOT coverage). ``not_run``
-    means a tagged node is in the sidecar but has no outcome in the report (e.g.
-    the run was interrupted before reaching it, or report and sidecar are from
-    different runs). The harness uses no xfail/xpass markers, so any outcome
-    other than passed/failed/error/skipped buckets as ``not_run``.
+    Fail closed: a control counts as ``covered`` only when *every* one of its
+    tagged probes produced an outcome in the report. Statuses, in precedence:
+
+    - ``incomplete`` -- at least one tagged probe ran (passed/failed/skipped)
+      but at least one other has NO outcome in the report (``not_run``). The
+      evidence is partial, so the control is NOT credited as covered even if the
+      probes that ran passed. Controls are deliberately spread across several
+      probes (e.g. ASVS 8.2.1 across ``test_payment_gate.py``), so a stale or
+      interrupted run that reaches only some of them would otherwise over-credit
+      coverage. A genuine failure among the ran probes is still surfaced as a
+      finding by ``reports/aggregate.py`` -- the ledger is coverage accounting,
+      not the findings gate -- so demoting ``fail+not_run`` here hides nothing.
+    - ``covered_failing`` -- all tagged probes ran and at least one failed.
+    - ``covered_passing`` -- all tagged probes ran, at least one passed, none
+      failed. Some may have skipped (provider/config absent); a skip is a
+      *complete* outcome, so pass+skip is still covered, and the counts keep the
+      skip visible.
+    - ``skipped`` -- all tagged probes ran and every one skipped (NOT coverage).
+    - ``not_run`` -- NO tagged probe has an outcome (the whole control is absent
+      from the report: run interrupted before it, or report/sidecar mismatch).
+
+    The harness uses no xfail/xpass markers, so any outcome other than
+    passed/failed/error/skipped buckets as ``not_run``.
     """
     counts = {"passed": 0, "failed": 0, "skipped": 0, "not_run": 0}
     for node_id in node_ids:
@@ -181,7 +196,12 @@ def _rollup(node_ids: list[str], outcomes: dict[str, str]) -> dict[str, Any]:
         else:
             counts["not_run"] += 1
 
-    if counts["failed"]:
+    ran = counts["passed"] + counts["failed"] + counts["skipped"]
+    if counts["not_run"]:
+        # Partial execution demotes to incomplete; a wholly-absent control stays
+        # not_run. Either way the control is never credited as covered.
+        status = "incomplete" if ran else "not_run"
+    elif counts["failed"]:
         status = "covered_failing"
     elif counts["passed"]:
         status = "covered_passing"
@@ -222,10 +242,14 @@ def build_coverage_ledger(
     asvs_index: dict[str, list[str]] = {}
     cwe_index: dict[str, list[str]] = {}
     for node_id, tags in sidecar.items():
-        for asvs_id in tags.get("asvs", []):
-            asvs_index.setdefault(asvs_id, []).append(node_id)
-        for cwe_id in tags.get("cwe", []):
-            cwe_index.setdefault(cwe_id, []).append(node_id)
+        if not isinstance(tags, dict):
+            continue  # the CLI rejects these before here; guard direct callers too
+        for asvs_id in tags.get("asvs") or []:
+            if isinstance(asvs_id, str):  # a non-string id is unhashable as a key
+                asvs_index.setdefault(asvs_id, []).append(node_id)
+        for cwe_id in tags.get("cwe") or []:
+            if isinstance(cwe_id, str):
+                cwe_index.setdefault(cwe_id, []).append(node_id)
 
     asvs_view = _build_axis(asvs_index, outcomes)
     cwe_view = _build_axis(cwe_index, outcomes)
@@ -243,6 +267,7 @@ def build_coverage_ledger(
 _STATUS_LABELS = {
     "covered_passing": "covered (passing)",
     "covered_failing": "covered (FINDING)",
+    "incomplete": "incomplete (partial run)",
     "skipped": "skipped (not coverage)",
     "not_run": "not run (absent from report)",
 }
@@ -269,6 +294,25 @@ def render_summary(ledger: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
+def _sidecar_entry_ok(tags: Any) -> bool:
+    """A sidecar entry is well-formed when it is an object whose 'asvs'/'cwe' are
+    absent, null, or lists of string ids -- exactly what write_sidecar emits.
+
+    The CLI checks this so a hand-edited or corrupted sidecar fails loudly with
+    the exit-3 infra code instead of escaping as a bare exception deeper in the
+    rollup (a non-string id is unhashable as an index key).
+    """
+    if not isinstance(tags, dict):
+        return False
+    for key in ("asvs", "cwe"):
+        value = tags.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            return False
+    return True
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -317,6 +361,40 @@ def main(argv: list[str] | None = None) -> int:
     except (json.JSONDecodeError, OSError) as exc:
         print(f"[error] Could not read marker sidecar {sidecar_path}: {exc}", file=sys.stderr)
         return 3
+
+    # Shape-validate the parsed JSON before use: a syntactically valid but
+    # wrong-shaped artifact (e.g. a top-level list) would otherwise raise
+    # AttributeError past these guards and escape the exit-3 infra contract.
+    if not isinstance(pytest_data, dict):
+        print(
+            f"[error] Pytest report {args.pytest_report} is malformed: expected a "
+            f"JSON object, got {type(pytest_data).__name__}.",
+            file=sys.stderr,
+        )
+        return 3
+    tests = pytest_data.get("tests")
+    if tests is not None and not isinstance(tests, list):
+        print(
+            f"[error] Pytest report {args.pytest_report} is malformed: 'tests' must "
+            f"be a list, got {type(tests).__name__}.",
+            file=sys.stderr,
+        )
+        return 3
+    if not isinstance(sidecar, dict):
+        print(
+            f"[error] Marker sidecar {sidecar_path} is malformed: expected a JSON "
+            f"object, got {type(sidecar).__name__}.",
+            file=sys.stderr,
+        )
+        return 3
+    for node_id, tags in sidecar.items():
+        if not _sidecar_entry_ok(tags):
+            print(
+                f"[error] Marker sidecar {sidecar_path} is malformed: entry "
+                f"{node_id!r} must be an object with list-of-string 'asvs'/'cwe' values.",
+                file=sys.stderr,
+            )
+            return 3
 
     outcomes = outcomes_from_pytest(pytest_data)
     ledger = build_coverage_ledger(sidecar, outcomes)
