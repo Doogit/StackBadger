@@ -128,7 +128,7 @@ def load_pytest_report(path: str | Path) -> dict:
 def outcomes_from_pytest(pytest_data: dict) -> dict[str, str]:
     """Map every reported test node id to its outcome (passed/failed/skipped/...)."""
     outcomes: dict[str, str] = {}
-    for test in pytest_data.get("tests", []):
+    for test in pytest_data.get("tests") or []:
         node_id = test.get("nodeid")
         if node_id:
             outcomes[node_id] = test.get("outcome", "")
@@ -139,18 +139,18 @@ def outcomes_from_pytest(pytest_data: dict) -> dict[str, str]:
 # Coverage rollup (pure)
 # ---------------------------------------------------------------------------
 
-_STATUS_ORDER = ("covered_passing", "covered_failing", "skipped", "not_run")
-
 
 def _natural_key(control_id: str) -> tuple:
     """Sort key giving natural order for dotted ASVS ids and numeric CWE ids.
 
-    Each dot-separated segment sorts numerically when it is all digits, else
-    lexically, so "2.3.1" < "2.4.1" < "15.3.2" and CWE "78" < "799".
+    Each dot-separated segment sorts numerically when it is all ASCII digits,
+    else lexically, so "2.3.1" < "2.4.1" < "15.3.2" and CWE "78" < "799".
+    ``isascii()`` guards the ``int()`` — ``str.isdigit()`` is also true for
+    non-decimal Unicode digits (e.g. superscripts) that ``int()`` rejects.
     """
     parts: list[tuple[int, Any]] = []
     for seg in str(control_id).split("."):
-        parts.append((0, int(seg)) if seg.isdigit() else (1, seg))
+        parts.append((0, int(seg)) if seg.isascii() and seg.isdigit() else (1, seg))
     return tuple(parts)
 
 
@@ -199,7 +199,9 @@ def _rollup(node_ids: list[str], outcomes: dict[str, str]) -> dict[str, Any]:
 
 
 def _summarize(view: dict[str, dict[str, Any]]) -> dict[str, int]:
-    summary = {status: 0 for status in _STATUS_ORDER}
+    # _STATUS_LABELS is the single source of both the status set and its order
+    # (dict insertion order); iterate it directly so the two never drift.
+    summary = {status: 0 for status in _STATUS_LABELS}
     for entry in view.values():
         summary[entry["status"]] += 1
     return summary
@@ -253,7 +255,7 @@ def render_summary(ledger: dict[str, Any]) -> str:
         view = ledger.get(axis, {})
         summary = ledger.get("summary", {}).get(axis, {})
         lines.append(f"{title} coverage (from probe tags) - {len(view)} control(s):")
-        for status in _STATUS_ORDER:
+        for status in _STATUS_LABELS:
             lines.append(f"  {_STATUS_LABELS[status]:<24} {summary.get(status, 0)}")
         for control_id, entry in view.items():
             lines.append(

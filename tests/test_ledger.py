@@ -112,6 +112,13 @@ def test_outcomes_from_pytest_maps_nodeid_to_outcome_ignoring_unnamed():
     assert outcomes_from_pytest(data) == {"t::a": "passed", "t::b": "skipped"}
 
 
+def test_outcomes_from_pytest_tolerates_null_tests_field():
+    # A report whose "tests" key is JSON null must not crash: dict.get(k, [])
+    # returns None (key present, value null), and iterating None would raise
+    # TypeError past main()'s exit-3 guards -> a bare exit 1 instead of infra-3.
+    assert outcomes_from_pytest({"tests": None}) == {}
+
+
 # ---------------------------------------------------------------------------
 # build_coverage_ledger
 # ---------------------------------------------------------------------------
@@ -156,6 +163,23 @@ def test_failing_takes_precedence_over_passing_for_a_shared_control():
     assert entry["nodes"] == ["t::a", "t::b"]
 
 
+def test_control_with_passing_and_skipped_nodes_is_covered_passing():
+    # The _rollup docstring's mixed case: one node ran+passed, a sibling skipped
+    # (provider absent). Status is covered_passing, but the skip stays visible in
+    # the counts rather than being folded into "pass".
+    sidecar = {
+        "t::pass": {"asvs": ["7.2.4"], "cwe": []},
+        "t::skip": {"asvs": ["7.2.4"], "cwe": []},
+    }
+    outcomes = {"t::pass": "passed", "t::skip": "skipped"}
+
+    entry = build_coverage_ledger(sidecar, outcomes)["asvs"]["7.2.4"]
+
+    assert entry["status"] == "covered_passing"
+    assert entry["passed"] == 1 and entry["skipped"] == 1
+    assert entry["total"] == 2
+
+
 def test_error_outcome_counts_as_failing():
     ledger = build_coverage_ledger(
         {"t::e": {"asvs": ["1.2.5"], "cwe": ["78"]}}, {"t::e": "error"}
@@ -174,6 +198,32 @@ def test_asvs_view_is_naturally_ordered():
     assert list(ledger["asvs"].keys()) == ["2.3.1", "2.4.1", "15.3.2"]
 
 
+def test_cwe_view_is_naturally_ordered():
+    # Bare-integer CWE ids sort numerically, not lexically ("799" before "1021").
+    sidecar = {
+        "t::a": {"asvs": [], "cwe": ["1021"]},
+        "t::b": {"asvs": [], "cwe": ["799"]},
+        "t::c": {"asvs": [], "cwe": ["78"]},
+    }
+    ledger = build_coverage_ledger(sidecar, {})
+    assert list(ledger["cwe"].keys()) == ["78", "799", "1021"]
+
+
+def test_natural_key_tolerates_non_ascii_digit_ids():
+    # str.isdigit() is True for a superscript "²", but int("²") raises.
+    # The isascii() guard must route such a segment to the lexical bucket rather
+    # than crash the sort. (Without the guard this call raises ValueError.)
+    sidecar = {
+        "t::u": {"asvs": ["²"], "cwe": []},  # superscript two
+        "t::n": {"asvs": ["2"], "cwe": []},
+    }
+    ledger = build_coverage_ledger(sidecar, {})  # must not raise
+    keys = list(ledger["asvs"].keys())
+    assert set(keys) == {"2", "²"}
+    # ASCII-numeric segment sorts ahead of the non-ASCII (lexical-bucket) one.
+    assert keys.index("2") < keys.index("²")
+
+
 # ---------------------------------------------------------------------------
 # render_summary
 # ---------------------------------------------------------------------------
@@ -187,6 +237,8 @@ def test_render_summary_contains_axis_titles_and_status_labels():
     assert "CWE coverage" in text
     assert "skipped (not coverage)" in text
     assert "2.3.1" in text and "841" in text
+    # The per-control detail line renders the numeric counts, not just labels.
+    assert "pass=0 fail=0 skip=1 n/a=0" in text
 
 
 # ---------------------------------------------------------------------------
