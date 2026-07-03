@@ -420,6 +420,14 @@ def main(argv: list[str] | None = None) -> int:
     ledger = build_coverage_ledger(sidecar, outcomes)
     ledger["generated_at"] = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # Expected-controls manifest view (not_covered / not_applicable by
+    # set-difference). Warn-only add-on: a missing/malformed manifest degrades
+    # gracefully and never changes this CLI's exit code. Local import keeps the
+    # ledger import (and run.sh's `import reports.ledger` probe) light.
+    from reports.manifest import attach_manifest_view
+
+    attach_manifest_view(ledger)
+
     if args.output:
         try:
             args.output.parent.mkdir(parents=True, exist_ok=True)

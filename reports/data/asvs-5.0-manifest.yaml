@@ -1,0 +1,100 @@
+# ASVS 5.0 expected-controls manifest for StackBadger's black-box harness.
+#
+# SOURCE: casa-asvs-readiness-plan.md §P1/§P2 (probe specs) + asvs-5.0-audit.md
+# (coverage matrix). Both source docs live under docs/plans/, which is gitignored
+# / local-only, so this file is the committed, CI-visible transcription of the
+# controls this harness ASSERTS it addresses. Curated 2026-07-03.
+#
+# WHY THIS FILE EXISTS: the coverage ledger (reports/ledger.py) joins per-probe
+# @pytest.mark.asvs("<id>") tags to run outcomes, so it can only classify a
+# control that has at least one tagged pytest node. Two states it cannot express
+# from tags alone are computed by set-difference against this manifest
+# (reports/manifest.py):
+#   - not_covered    : a control the harness asserts it should probe, but which
+#                      has zero tagged nodes (probe never written or tag dropped
+#                      -- a coverage regression).
+#   - not_applicable : a control deliberately excluded by written justification.
+#
+# ID FORMAT: keys match the @pytest.mark.asvs("<id>") tag form -- dotted, no "V"
+# prefix (e.g. "7.2.4", not "V7.2.4"). n-a exclusions are kept at the granularity
+# the source docs justify (chapter/section) rather than inventing sub-ids.
+#
+# HONEST/BOUNDED: this is a curated, defensible subset of ASVS 5.0 -- the
+# black-box-observable controls StackBadger asserts it addresses over the wire,
+# plus the named exclusions -- NOT the full ~350-requirement standard. A skip is
+# NOT coverage: a control whose only probes skipped carries the ledger's own
+# "skipped" status, never "covered".
+#
+# Each entry has:
+#   status : "expected" (a black-box probe should exercise it) or "n-a"
+#            (justified out-of-scope for this harness).
+#   note   : one-line justification / probe pointer, required for EVERY entry.
+
+controls:
+  # --- V1 Encoding & Injection (plan §P1-F) ---
+  "1.2.5": {status: expected, note: "OS-command injection (L1) -- test_injection.py"}
+  "1.3.6": {status: expected, note: "SSRF to internal/metadata targets -- test_injection.py"}
+  "1.5.1": {status: expected, note: "XXE / external-entity resolution (L1) -- test_injection.py"}
+
+  # --- V2 Validation & Business Logic (plan §P2-G, §P2-F) ---
+  "2.3.1": {status: expected, note: "Business-flow step-sequence / anti-automation (L1) -- test_business_logic.py"}
+  "2.3.3": {status: expected, note: "Transaction atomicity on payment flows -- test_payment_gate.py"}
+  "2.4.1": {status: expected, note: "Per-user quota / anti-automation -- test_business_logic.py"}
+
+  # --- V3 Web Frontend Security (plan §P2-E, §P2-B) ---
+  "3.4.6": {status: expected, note: "CSP frame-ancestors clickjacking defense (L2) -- test_cors_headers.py"}
+  "3.5.1": {status: expected, note: "Anti-CSRF token on state-changing requests (L1) -- test_api_surface.py"}
+
+  # --- V4 API & Web Service (plan §P2-F payments) ---
+  "4.1.5": {status: expected, note: "Per-message webhook signature verification on cross-system requests -- test_webhook_paddle.py / test_webhook_lemonsqueezy.py"}
+
+  # --- V5 File Handling (plan §P2-C) ---
+  "5.2.3": {status: expected, note: "Zip-bomb / uncompressed-size limit -- test_file_upload.py"}
+  "5.4.1": {status: expected, note: "Content-Disposition on file serve -- test_file_upload.py"}
+
+  # --- V6 Authentication deltas (plan §P2-D) ---
+  "6.2.2": {status: expected, note: "Registration-time weak-password acceptance -- test_auth_flows.py"}
+  "6.3.8": {status: expected, note: "Authentication-delta control (provider-managed testable edge) -- test_auth_flows.py"}
+
+  # --- V7 Session Management (plan §P1-A) ---
+  "7.2.4": {status: expected, note: "New session token on auth, old terminated (L1) -- test_session.py"}
+  "7.4.1": {status: expected, note: "Logout / session-termination invalidation (L1) -- test_session.py"}
+  "7.5.1": {status: expected, note: "Re-auth before sensitive account change -- test_session.py"}
+
+  # --- V8 Authorization (plan §P2-F, §P2-A) ---
+  "8.2.1": {status: expected, note: "Function-level authorization / payment gate (L1) -- test_payment_gate.py"}
+  "8.2.3": {status: expected, note: "Field-level authorization / mass-assignment BOPLA (L2) -- test_mass_assignment.py"}
+
+  # --- V9 Self-Contained Tokens (plan §P1-E) ---
+  "9.2.2": {status: expected, note: "Token type/typ confusion rejected (L2) -- test_auth_bypass.py"}
+  "9.2.3": {status: expected, note: "Wrong audience (aud) rejected (L2) -- test_auth_bypass.py"}
+
+  # --- V10 OAuth/OIDC (plan §P1-B, §P1-D) ---
+  # These mirror the ids tagged in test_oauth_flow.py. 10.4.1 (exact-match
+  # redirect-URI) is authorization-server-owned (Google); the harness carries it
+  # only as a Track-C attestation stub, not a live over-the-wire probe, but it is
+  # a tagged node so it is accounted for here rather than silently omitted.
+  "10.1.1": {status: expected, note: "Delegated-send tokens never returned to the browser (L2) -- test_oauth_flow.py"}
+  "10.2.1": {status: expected, note: "OAuth state parameter / callback CSRF -- test_oauth_flow.py"}
+  "10.2.3": {status: expected, note: "Requested-scope minimization -- test_oauth_flow.py"}
+  "10.4.1": {status: expected, note: "Exact-match redirect-URI; authorization-server-owned, carried as a Track-C attestation stub -- test_oauth_flow.py"}
+  "10.4.6": {status: expected, note: "App sends a PKCE S256 code_challenge (client-observable) -- test_oauth_flow.py"}
+  "10.5.1": {status: expected, note: "ID-token nonce/aud/iss validation, replay rejected -- test_oauth_flow.py"}
+
+  # --- V13 Configuration (plan §P2-B) ---
+  "13.4.4": {status: expected, note: "HTTP TRACE method disabled (L2) -- test_api_surface.py"}
+
+  # --- V14 Data Protection (plan §P1-C) ---
+  "14.2.1": {status: expected, note: "No sensitive data in URL/query (L1) -- test_data_protection.py"}
+  "14.3.2": {status: expected, note: "Cache-Control: no-store on sensitive responses (L2) -- test_data_protection.py"}
+  "14.3.3": {status: expected, note: "No browser-storable secrets -- test_data_protection.py"}
+
+  # --- V15 Secure Coding & Architecture (plan §P1-F, §P2-A) ---
+  "15.3.2": {status: expected, note: "SSRF (secure-coding view) -- test_injection.py"}
+  "15.3.3": {status: expected, note: "Mass-assignment (secure-coding view) -- test_mass_assignment.py"}
+
+  # --- Justified exclusions (asvs-5.0-audit.md N/A + plan §5) ---
+  "11": {status: n-a, note: "V11 Cryptography: key management, algorithms and hashing parameters need source/infra access -- structurally unobservable to a black-box prober."}
+  "17": {status: n-a, note: "V17 WebRTC: no WebRTC/TURN/SRTP/DTLS surface in the supported provider matrix."}
+  "4.3": {status: n-a, note: "V4.3 GraphQL: REST/PostgREST stacks; excluded unless a GraphQL endpoint is confirmed present (Phase 0 confirm-absent)."}
+  "4.4": {status: n-a, note: "V4.4 WebSocket: no WebSocket surface in the supported stacks; excluded unless confirmed present (Phase 0 confirm-absent)."}
