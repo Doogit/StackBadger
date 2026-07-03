@@ -21,7 +21,33 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
-BASH = shutil.which("bash")
+
+def _git_bash_candidates() -> list[str]:
+    return [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\usr\bin\bash.exe",
+    ]
+
+
+def resolve_bash() -> str | None:
+    """Prefer a real Git Bash over the WindowsApps WSL shim on Windows.
+
+    `shutil.which("bash")` often resolves to `...\\WindowsApps\\bash.exe`, which
+    launches the deprecated WSL shim and can hang these shell-level tests.
+    Git Bash behaves like the non-interactive Bash runner the harness expects.
+    """
+    bash = shutil.which("bash")
+    if bash and "windowsapps" not in bash.lower():
+        return bash
+    for candidate in _git_bash_candidates():
+        if Path(candidate).exists():
+            return candidate
+    return bash
+
+
+BASH = resolve_bash()
 
 requires_bash = pytest.mark.skipif(BASH is None, reason="bash not available on PATH")
 
