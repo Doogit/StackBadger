@@ -397,6 +397,22 @@ def test_main_non_list_tests_field_returns_infra_error(tmp_path):
     assert main(["--pytest-report", str(report)]) == 3
 
 
+def test_main_non_dict_test_entry_returns_infra_error(tmp_path):
+    # A list entry that is not a test object must fail closed, not be skipped.
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"tests": ["garbage"]}), encoding="utf-8")
+    write_sidecar({"t::s": {"asvs": ["2.3.1"], "cwe": []}}, sidecar_path_for(report))
+    assert main(["--pytest-report", str(report)]) == 3
+
+
+def test_main_non_string_nodeid_returns_infra_error(tmp_path):
+    # A non-string nodeid is a malformed report entry, not a recoverable row.
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"tests": [{"nodeid": [], "outcome": "passed"}]}), encoding="utf-8")
+    write_sidecar({"t::s": {"asvs": ["2.3.1"], "cwe": []}}, sidecar_path_for(report))
+    assert main(["--pytest-report", str(report)]) == 3
+
+
 def test_main_non_dict_sidecar_entry_returns_infra_error(tmp_path):
     # A sidecar that is a dict but whose entry value is not an object ([]) would
     # hit tags.get(...) in build_coverage_ledger -> must be caught as exit 3.

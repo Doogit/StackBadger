@@ -314,6 +314,18 @@ def _sidecar_entry_ok(tags: Any) -> bool:
     return True
 
 
+def _pytest_test_entry_ok(test: Any) -> bool:
+    """A pytest-report test entry is well-formed when it is an object whose
+    optional 'nodeid' field is a string.
+
+    main() validates this so a corrupted report fails closed with exit 3 rather
+    than silently dropping malformed entries and understating missing coverage.
+    """
+    return isinstance(test, dict) and (
+        "nodeid" not in test or test["nodeid"] is None or isinstance(test["nodeid"], str)
+    )
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Emit the ASVS/CWE coverage ledger from probe tags + pytest outcomes."
@@ -380,6 +392,14 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 3
+    for idx, test in enumerate(tests or []):
+        if not _pytest_test_entry_ok(test):
+            print(
+                f"[error] Pytest report {args.pytest_report} is malformed: "
+                f"tests[{idx}] must be an object with an optional string 'nodeid'.",
+                file=sys.stderr,
+            )
+            return 3
     if not isinstance(sidecar, dict):
         print(
             f"[error] Marker sidecar {sidecar_path} is malformed: expected a JSON "
