@@ -61,6 +61,11 @@ from exclusions import (  # noqa: E402
 )
 from profile import load_profile  # noqa: E402
 from profile_assembler import assemble_profile  # noqa: E402
+from reports.ledger import (  # noqa: E402
+    extract_marker_sidecar,
+    sidecar_path_for,
+    write_sidecar,
+)
 from reports.scrub import scrub_evidence_body, scrub_locator  # noqa: E402
 
 
@@ -252,6 +257,29 @@ def _marker_field(marker_name: str) -> str:
         "stripe": "payments",
         "storage": "storage",
     }.get(marker_name, marker_name)
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """Emit the ASVS/CWE marker sidecar — the coverage-ledger input (Tier-2).
+
+    ``pytest-json-report`` records marker *names* but not their *arguments*, so
+    the ``asvs(id)`` / ``cwe(id)`` ids are captured here at collection time (when
+    every collected node — including ones about to skip — is visible with its
+    markers) and joined against pass/skip/fail outcomes by ``reports.ledger``.
+
+    Gated on ``SCAN_SCOPE=asvs`` so core/CI runs stay byte-identical: the ledger
+    only runs under asvs scope. The sidecar path mirrors ``--json-report-file``
+    (suffix-swapped) so run.sh's timestamped report and its sidecar co-locate.
+    A write failure is warned, never fatal — the sidecar is auxiliary to the scan.
+    """
+    if os.environ.get("SCAN_SCOPE", "core") != "asvs":
+        return
+    json_report_file = session.config.getoption("json_report_file", default=None)
+    dest = sidecar_path_for(json_report_file or "report.json")
+    try:
+        write_sidecar(extract_marker_sidecar(session.items), dest)
+    except OSError as exc:
+        print(f"[warn] Could not write ASVS marker sidecar to {dest}: {exc}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------

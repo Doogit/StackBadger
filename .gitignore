@@ -13,6 +13,7 @@ reports/output/
 reports/evidence/
 reports/pytest-report.json
 reports/zap-report.json
+*.asvs-markers.json
 fixtures/records_oversized.csv
 zap/automation-plan.runtime.yaml
 
