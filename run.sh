@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # run.sh — Pentest harness orchestrator
-# Usage: ./run.sh <target_url> [--full [--yes]] [--branch] [--profile <path>] [--skip-zap]
+# Usage: ./run.sh <target_url> [--full [--yes]] [--branch] [--profile <path>] [--skip-zap] [--scope core|asvs]
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -51,6 +51,11 @@ SKIP_ZAP=false
 FULL_MODE=false
 AUTO_YES=false
 USE_BRANCH=false
+# Scope axis (orthogonal to the read-only/write safety axis): core = today's
+# targeted suite (default); asvs = the heavy ASVS pre-audit gap-finder that also
+# emits the coverage ledger. Empty until parsed so an unset flag can trigger the
+# TTY prompt below without overriding an explicit --scope.
+SCOPE=""
 
 # Parse positional + named args. First bare argument is the target URL unless
 # it looks like a flag.
@@ -82,6 +87,11 @@ while [[ $# -gt 0 ]]; do
       USE_BRANCH=true
       shift
       ;;
+    --scope)
+      [[ $# -lt 2 || -z "$2" ]] && fail "--scope requires a value: core or asvs."
+      SCOPE="$2"
+      shift 2
+      ;;
     --*)
       fail "Unknown flag: $1"
       ;;
@@ -98,8 +108,29 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$TARGET_URL" ]]; then
-  echo "Usage: $0 <target_url> [--full [--yes]] [--branch] [--profile <path>] [--skip-zap]" >&2
+  echo "Usage: $0 <target_url> [--full [--yes]] [--branch] [--profile <path>] [--skip-zap] [--scope core|asvs]" >&2
   exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Scope axis resolution (flag-first; TTY prompt only when unset)
+# ---------------------------------------------------------------------------
+# Resolve --scope before any gate so an invalid value fails fast. If the flag
+# was omitted, prompt interactively ONLY when stdin is a TTY; in CI / piped
+# invocations there is no prompt and the default stays `core` so the heavy
+# suite never runs unattended.
+if [[ -z "$SCOPE" ]]; then
+  if [[ -t 0 ]]; then
+    # Same read -r -p idiom as the --full confirm below; empty input or EOF
+    # (Ctrl-D) falls back to the default rather than aborting under set -e.
+    read -r -p "Scan scope? [core/asvs] (default: core) " _scope_reply || _scope_reply=""
+    SCOPE="${_scope_reply:-core}"
+  else
+    SCOPE="core"
+  fi
+fi
+if [[ "$SCOPE" != "core" && "$SCOPE" != "asvs" ]]; then
+  fail "Invalid --scope '$SCOPE'. Valid values: core, asvs."
 fi
 
 # ---------------------------------------------------------------------------
@@ -269,6 +300,16 @@ fi
 # ---------------------------------------------------------------------------
 # Mode selection
 # ---------------------------------------------------------------------------
+# Scope axis: exported here (alongside PENTEST_MODE below) so it reaches the
+# pytest subprocess, whose conftest deselects asvs_extended probes unless
+# SCAN_SCOPE=asvs. Orthogonal to PENTEST_MODE — the two compose freely.
+export SCAN_SCOPE="$SCOPE"
+if [[ "$SCOPE" == "asvs" ]]; then
+  info "Scan scope: asvs (extended ASVS probe set + coverage ledger)."
+else
+  info "Scan scope: core (default targeted suite). Use --scope asvs for the pre-audit gap-finder."
+fi
+
 if [[ "$USE_BRANCH" == "true" ]]; then
   # --branch implies --full (branch exists specifically for destructive testing)
   FULL_MODE=true
@@ -893,6 +934,34 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# ASVS/CWE coverage ledger (scope=asvs only)
+# ---------------------------------------------------------------------------
+# Joins the collection-time marker sidecar (written by conftest under
+# SCAN_SCOPE=asvs) with the run's pass/skip/fail outcomes. Kept separate from
+# aggregate: it builds coverage accounting, not findings, and does NOT feed the
+# exit-1 severity gate. A ledger failure is surfaced (warn) but never changes
+# run.sh's overall exit code — the findings gate is authoritative.
+LEDGER_OUTPUT="reports/output/coverage-ledger-${RUN_TS}.json"
+if [[ "$SCOPE" == "asvs" ]]; then
+  if [[ ! -f "$PYTEST_REPORT_FILE" ]]; then
+    warn "pytest JSON report not found at $PYTEST_REPORT_FILE — skipping coverage ledger."
+  elif "$PYTHON_BIN" -c "import reports.ledger" &>/dev/null 2>&1; then
+    info "Building ASVS/CWE coverage ledger..."
+    set +e
+    "$PYTHON_BIN" -m reports.ledger \
+      --pytest-report "$PYTEST_REPORT_FILE" \
+      --output "$LEDGER_OUTPUT"
+    LEDGER_EXIT=$?
+    set -e
+    if [[ $LEDGER_EXIT -ne 0 ]]; then
+      warn "coverage ledger exited $LEDGER_EXIT — ledger not emitted (findings gate unaffected)."
+    fi
+  else
+    warn "reports.ledger module not found — skipping coverage ledger."
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
@@ -901,6 +970,7 @@ echo " Pentest Harness Run Complete"
 echo "========================================================"
 echo " Target:         $TARGET_BASE_URL"
 echo " Mode:           $PENTEST_MODE"
+echo " Scope:          $SCOPE"
 echo " Profile:        ${PROFILE:-<none>}"
 echo " ZAP scan:       $( [[ "$ZAP_AVAILABLE" == "true" ]] && echo "ran" || echo "skipped" )"
 echo " pytest report:  reports/pytest-report-${RUN_TS}.json"
@@ -909,6 +979,9 @@ if [[ "$ZAP_AVAILABLE" == "true" && -f "reports/zap-report-${RUN_TS}.json" ]]; t
 fi
 if [[ -d "reports/output" ]]; then
   echo " Merged output:  reports/output/"
+fi
+if [[ "$SCOPE" == "asvs" && "${LEDGER_EXIT:-1}" -eq 0 && -f "$LEDGER_OUTPUT" ]]; then
+  echo " Coverage ledger: $LEDGER_OUTPUT"
 fi
 echo "========================================================"
 echo ""

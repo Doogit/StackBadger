@@ -125,6 +125,17 @@ If the user selects **full mode** and the target uses **Supabase**, recommend `-
 For non-Supabase targets in full mode, use `--full --yes` against a non-production deployment.
 If the user doesn't specify, use read-only mode with no extra flags.
 
+Then select the **scan scope** (a second, orthogonal choice — it composes with the mode above):
+> **Scan scope:**
+> - **core** (default) — today's targeted findings suite. Fast.
+> - **asvs** — the ASVS pre-audit gap-finder: runs the heavy `asvs_extended` probe set and emits
+>   the ASVS/CWE coverage ledger. Slower, more traffic.
+>
+> Which scope? (default: core)
+
+Pass `--scope asvs` for the gap-finder; omit it (or `--scope core`) otherwise. Scope is independent
+of the mode — `--scope asvs` does **not** enable write probes.
+
 ### Step 2: Pre-flight checks
 
 ```bash
@@ -261,12 +272,13 @@ rm -rf reports/output reports/evidence
 #   Read-only (default): (empty)
 #   Full + branch:       --branch --yes
 #   Full (no branch):    --full --yes
+# SCOPE_FLAG (optional): --scope asvs   (pre-audit gap-finder + coverage ledger; default core)
 # PROFILE_FLAG (optional): --profile profiles/<name>.yaml   (omit for black-box)
 
 if command -v docker >/dev/null 2>&1; then
-  ./run.sh <TARGET_URL> <PROFILE_FLAG> <MODE_FLAGS>
+  ./run.sh <TARGET_URL> <PROFILE_FLAG> <SCOPE_FLAG> <MODE_FLAGS>
 else
-  ./run.sh <TARGET_URL> <PROFILE_FLAG> --skip-zap <MODE_FLAGS>
+  ./run.sh <TARGET_URL> <PROFILE_FLAG> <SCOPE_FLAG> --skip-zap <MODE_FLAGS>
 fi
 ```
 
@@ -320,6 +332,12 @@ fi
 Read and summarize `reports/output/` for the user. Highlight actionable findings and distinguish
 them from the known platform-dependent findings listed in the README. Map unrecognized errors via
 the README [Troubleshooting table](README.md#troubleshooting).
+
+**`--scope asvs` only:** a coverage ledger is also written to
+`reports/output/coverage-ledger-<ts>.json` (ASVS-5.0 + CWE views). It is a **coverage** accounting
+artifact, not findings — a skipped probe renders as `skipped`, never as covered — and does **not**
+affect the exit code (the findings-severity gate above is authoritative). A ledger failure warns but
+never fails the run.
 
 ### Step 7: Post-run recap
 

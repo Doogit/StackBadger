@@ -245,6 +245,24 @@ Auto-creates a disposable Supabase branch database, runs the full suite against 
 branch afterward — even on failure or Ctrl-C. Requires `SUPABASE_ACCESS_TOKEN`. The safest way to
 run write probes. (Supabase-only; other databases use `--full` against a staging target.)
 
+### Scope (`--scope core|asvs`)
+
+A second axis, **orthogonal** to the read-only/full safety axis above (the two compose freely):
+
+```bash
+./run.sh https://your-site.com --scope asvs --skip-zap
+```
+
+- **`--scope core`** (default): today's targeted findings suite. Fast; the CI regression gate.
+- **`--scope asvs`**: the ASVS pre-audit gap-finder — runs the heavy `asvs_extended` probe set and
+  emits the ASVS/CWE **coverage ledger** to `reports/output/coverage-ledger-<ts>.json`. `core` runs
+  are byte-identical whether or not this flag machinery exists, so existing invocations and CI are
+  unaffected.
+
+`--scope asvs` does **not** enable write probes — that is still `--full`/`--branch`. When run.sh is
+attached to a terminal and `--scope` is omitted, it prompts; in CI / piped runs it defaults to
+`core` (never blocks). The raw-pytest dev path sets `SCAN_SCOPE=asvs` directly instead.
+
 ## Test accounts & provisioning
 
 StackBadger needs **two separate user accounts** in the target's auth system, used for cross-user
@@ -324,6 +342,7 @@ accounts are deleted the same way they were created (dashboard).
 | `PENTEST_USER_A_EMAIL` / `_PASSWORD` | Yes | Test account A. |
 | `PENTEST_USER_B_EMAIL` / `_PASSWORD` | Yes (IDOR tests) | Test account B (cross-user probes). |
 | `TARGET_BASE_URL` | No | Overrides the target URL CLI argument. |
+| `SCAN_SCOPE` | No | `core` (default) or `asvs` — the scope axis (see [Scope](#scope---scope-coreasvs)). `run.sh --scope` exports it; the raw-pytest dev path sets it directly to run `asvs_extended` probes and emit the coverage ledger. |
 | `SUPABASE_ACCESS_TOKEN` | No | Supabase Management API token — required only for `--branch`. (It cannot call the GoTrue Admin API — see `SUPABASE_SERVICE_ROLE_KEY`.) |
 | `SUPABASE_SERVICE_ROLE_KEY` | No | Project service-role key — required only by `provision_accounts.py` / `teardown.py` (the Admin API accepts nothing else). Never echoed; keep it out of transcripts. |
 | `PENTEST_USER_A_ID` / `_B_ID` | No | Written by `provision_accounts.py`; used by `teardown.py` to delete by ID. |
