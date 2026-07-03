@@ -88,7 +88,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --scope)
-      [[ $# -lt 2 ]] && fail "--scope requires a value: core or asvs."
+      [[ $# -lt 2 || -z "$2" ]] && fail "--scope requires a value: core or asvs."
       SCOPE="$2"
       shift 2
       ;;
@@ -121,14 +121,10 @@ fi
 # suite never runs unattended.
 if [[ -z "$SCOPE" ]]; then
   if [[ -t 0 ]]; then
-    echo "Select scan scope:" >&2
-    select _scope_choice in "core (default — targeted findings suite)" "asvs (heavy pre-audit gap-finder + coverage ledger)"; do
-      case "$REPLY" in
-        1) SCOPE="core"; break ;;
-        2) SCOPE="asvs"; break ;;
-        *) echo "Enter 1 or 2." >&2 ;;
-      esac
-    done
+    # Same read -r -p idiom as the --full confirm below; empty input or EOF
+    # (Ctrl-D) falls back to the default rather than aborting under set -e.
+    read -r -p "Scan scope? [core/asvs] (default: core) " _scope_reply || _scope_reply=""
+    SCOPE="${_scope_reply:-core}"
   else
     SCOPE="core"
   fi
@@ -984,7 +980,7 @@ fi
 if [[ -d "reports/output" ]]; then
   echo " Merged output:  reports/output/"
 fi
-if [[ "$SCOPE" == "asvs" && -f "$LEDGER_OUTPUT" ]]; then
+if [[ "$SCOPE" == "asvs" && "${LEDGER_EXIT:-1}" -eq 0 && -f "$LEDGER_OUTPUT" ]]; then
   echo " Coverage ledger: $LEDGER_OUTPUT"
 fi
 echo "========================================================"

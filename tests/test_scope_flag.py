@@ -50,6 +50,14 @@ def test_scope_requires_a_value(sandbox):
     assert "--scope requires a value" in result.stderr
 
 
+def test_empty_scope_value_rejected_not_silently_defaulted(sandbox):
+    # An explicit empty value (e.g. `--scope "$UNSET_VAR"` in CI) must fail
+    # fast, not be silently indistinguishable from an omitted flag.
+    result = run_sh(sandbox, [REMOTE, "--scope", ""])
+    assert result.returncode == 1
+    assert "--scope requires a value" in result.stderr
+
+
 def test_default_scope_is_core(sandbox):
     # No --scope, non-TTY stdin (subprocess) → no prompt, defaults to core.
     stub_doctor(sandbox, 0)
