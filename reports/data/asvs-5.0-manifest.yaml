@@ -35,31 +35,46 @@ controls:
   "1.2.5": {status: expected, note: "OS-command injection (L1) -- test_injection.py"}
   "1.3.6": {status: expected, note: "SSRF to internal/metadata targets -- test_injection.py"}
   "1.5.1": {status: expected, note: "XXE / external-entity resolution (L1) -- test_injection.py"}
+  "1.3.7": {status: expected, note: "Server-side template injection (SSTI) into free-text params -- UNBUILT gap; intended test_injection.py (audit backlog #5)"}
+  "1.2.6": {status: n-a, note: "LDAP injection -- no LDAP directory backend in the supported provider matrix (Supabase/Clerk/Firebase/PostgREST/Firestore); confirm-absent like GraphQL/WebSocket."}
+  "1.2.7": {status: n-a, note: "XPath/XML-query injection -- no XPath-over-XML backend in the supported stacks; confirm-absent."}
+  "1.5.2": {status: n-a, note: "Unsafe-deserialization integrity check -- serialized-object integrity is a server-internal property, not reliably observable to a black-box prober."}
 
   # --- V2 Validation & Business Logic (plan §P2-G, §P2-F) ---
   "2.3.1": {status: expected, note: "Business-flow step-sequence / anti-automation (L1) -- test_business_logic.py"}
   "2.3.3": {status: expected, note: "Transaction atomicity on payment flows -- test_payment_gate.py"}
   "2.4.1": {status: expected, note: "Per-user quota / anti-automation -- test_business_logic.py"}
+  "2.3.4": {status: expected, note: "Concurrent double-booking / resource locking -- UNBUILT gap; intended test_business_logic.py (audit V2 gap)"}
 
   # --- V3 Web Frontend Security (plan §P2-E, §P2-B) ---
   "3.4.6": {status: expected, note: "CSP frame-ancestors clickjacking defense (L2) -- test_cors_headers.py"}
   "3.5.1": {status: expected, note: "Anti-CSRF token on state-changing requests (L1) -- test_api_surface.py"}
+  "3.5.5": {status: n-a, note: "postMessage handler origin validation -- client-side DOM behavior, not observable by this API-level (non-browser) harness."}
+  "3.6.1": {status: n-a, note: "Subresource Integrity (SRI) (L3) -- L3 stretch, out of CASA Tier-2 scope (plan §P2-E moves it to §11 stretch)."}
 
   # --- V4 API & Web Service (plan §P2-F payments) ---
   "4.1.5": {status: expected, note: "Per-message webhook signature verification on cross-system requests -- test_webhook_paddle.py / test_webhook_lemonsqueezy.py"}
+  "4.1.1": {status: expected, note: "Content-Type header matches request body -- only partially asserted today; UNBUILT dedicated probe; intended test_api_surface.py (audit V4 gap)"}
+  "4.2.1": {status: expected, note: "HTTP request-smuggling (CL/TE desync) resistance -- UNBUILT gap; intended test_api_surface.py (audit V4 4.2.x)"}
 
   # --- V5 File Handling (plan §P2-C) ---
   "5.2.3": {status: expected, note: "Zip-bomb / uncompressed-size limit -- test_file_upload.py"}
   "5.4.1": {status: expected, note: "Content-Disposition on file serve -- test_file_upload.py"}
+  "5.4.3": {status: expected, note: "Server-side AV/malware scan on upload (L2, where the target claims scanning; EICAR probe) -- UNBUILT gap; intended test_file_upload.py (audit V5 gap, plan §P2-C)"}
 
   # --- V6 Authentication deltas (plan §P2-D) ---
   "6.2.2": {status: expected, note: "Registration-time weak-password acceptance -- test_auth_flows.py"}
   "6.3.8": {status: expected, note: "Authentication-delta control (provider-managed testable edge) -- test_auth_flows.py"}
+  "6.3.1": {status: n-a, note: "Account lockout / brute-force enforcement -- provider-managed (Clerk/Firebase/Supabase Auth own lockout); not black-box observable on this harness."}
+  "6.3.3": {status: n-a, note: "Multi-factor authentication -- provider-managed (IdP owns MFA enrollment/enforcement); out of black-box reach."}
+  "6.4": {status: n-a, note: "V6.4 Credential recovery -- provider-managed secure-recovery flow (Clerk/Firebase/Supabase Auth); excluded at section granularity."}
 
   # --- V7 Session Management (plan §P1-A) ---
   "7.2.4": {status: expected, note: "New session token on auth, old terminated (L1) -- test_session.py"}
   "7.4.1": {status: expected, note: "Logout / session-termination invalidation (L1) -- test_session.py"}
   "7.5.1": {status: expected, note: "Re-auth before sensitive account change -- test_session.py"}
+  "7.3.1": {status: expected, note: "Idle session timeout (L2) -- UNBUILT gap; intended test_session.py (audit backlog #1, plan §P1-A 7.3.x)"}
+  "7.3.2": {status: expected, note: "Absolute session timeout (L2) -- UNBUILT gap; intended test_session.py (audit backlog #1, plan §P1-A 7.3.x)"}
 
   # --- V8 Authorization (plan §P2-F, §P2-A) ---
   "8.2.1": {status: expected, note: "Function-level authorization / payment gate (L1) -- test_payment_gate.py"}
@@ -68,6 +83,7 @@ controls:
   # --- V9 Self-Contained Tokens (plan §P1-E) ---
   "9.2.2": {status: expected, note: "Token type/typ confusion rejected (L2) -- test_auth_bypass.py"}
   "9.2.3": {status: expected, note: "Wrong audience (aud) rejected (L2) -- test_auth_bypass.py"}
+  "9.1.3": {status: expected, note: "jku/x5u/jwk header key-source allowlist enforced -- UNBUILT gap; intended test_auth_bypass.py (audit V9 gap)"}
 
   # --- V10 OAuth/OIDC (plan §P1-B, §P1-D) ---
   # These mirror the ids tagged in test_oauth_flow.py. 10.4.1 (exact-match
@@ -80,18 +96,31 @@ controls:
   "10.4.1": {status: expected, note: "Exact-match redirect-URI; authorization-server-owned, carried as a Track-C attestation stub -- test_oauth_flow.py"}
   "10.4.6": {status: expected, note: "App sends a PKCE S256 code_challenge (client-observable) -- test_oauth_flow.py"}
   "10.5.1": {status: expected, note: "ID-token nonce/aud/iss validation, replay rejected -- test_oauth_flow.py"}
+  "10.4.2": {status: n-a, note: "Authorization-code single-use + revocation (L1) -- authorization-server-owned (Google AS enforces it); Track-C attestation, not a probe."}
+  "10.4.5": {status: n-a, note: "Refresh-token rotation -- authorization-server-owned (Google AS); Track-C attestation, not a black-box probe."}
+
+  # --- V12 Secure Communication (ZAP-delegated / Track T) ---
+  "12.1.1": {status: n-a, note: "TLS for all client connectivity (L1) -- ZAP-delegated (Track T); native TLS probe is a plan §8.1 stretch, unbuilt."}
+  "12.2.1": {status: n-a, note: "TLS version/cipher strength (L1) -- ZAP-delegated (Track T); native probe unbuilt (plan §8.1 stretch)."}
+  "12.3.1": {status: n-a, note: "Certificate validity/trust (L2) -- ZAP-delegated (Track T); native probe unbuilt (plan §8.1 stretch)."}
 
   # --- V13 Configuration (plan §P2-B) ---
   "13.4.4": {status: expected, note: "HTTP TRACE method disabled (L2) -- test_api_surface.py"}
+  "13.4.2": {status: expected, note: "Debug-mode / verbose diagnostics disabled beyond error leakage -- UNBUILT gap; intended test_info_disclosure.py (audit V13 gap)"}
 
   # --- V14 Data Protection (plan §P1-C) ---
   "14.2.1": {status: expected, note: "No sensitive data in URL/query (L1) -- test_data_protection.py"}
   "14.3.2": {status: expected, note: "Cache-Control: no-store on sensitive responses (L2) -- test_data_protection.py"}
   "14.3.3": {status: expected, note: "No browser-storable secrets -- test_data_protection.py"}
+  "14.2.5": {status: expected, note: "Web-cache-deception resistance -- UNBUILT gap; intended test_data_protection.py (audit V14 gap)"}
 
   # --- V15 Secure Coding & Architecture (plan §P1-F, §P2-A) ---
   "15.3.2": {status: expected, note: "SSRF (secure-coding view) -- test_injection.py"}
   "15.3.3": {status: expected, note: "Mass-assignment (secure-coding view) -- test_mass_assignment.py"}
+  "15.3.7": {status: expected, note: "HTTP parameter pollution (HPP) -- UNBUILT gap; intended test_injection.py / test_api_surface.py (audit V15 gap)"}
+
+  # --- V16 Logging & Error Handling ---
+  "16.5.3": {status: expected, note: "Fail-secure / default-deny on error in security controls -- UNBUILT dedicated probe; intended test_api_surface.py (audit V16 gap; 16.5.1 generic-error is covered)"}
 
   # --- Justified exclusions (asvs-5.0-audit.md N/A + plan §5) ---
   "11": {status: n-a, note: "V11 Cryptography: key management, algorithms and hashing parameters need source/infra access -- structurally unobservable to a black-box prober."}
