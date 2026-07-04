@@ -14,6 +14,14 @@ stack-agnostic and safe-by-default are especially welcome.
   hardcode a name from one specific application.
 - Keep the default **read-only**. New write/mutation probes must be marked
   `@pytest.mark.write_probe` so they only run under `--full`.
+- **Tag every new probe for coverage.** Each probe must carry
+  `@pytest.mark.asvs("<id>")` and `@pytest.mark.cwe(<n>)` — these are the ids the
+  coverage ledger joins on. Heavy / slow probes also belong in the extended set:
+  add `@pytest.mark.asvs_extended` so they run only under `--scope asvs`
+  (`SCAN_SCOPE=asvs`). The offline AST tag-lint (`tests/test_asvs_tag_lint.py`,
+  run in CI) fails any `asvs_extended` probe that is missing either the `asvs` or
+  `cwe` tag — and any such probe that issues a mutating method
+  (POST/PUT/PATCH/DELETE) without `@pytest.mark.write_probe`.
 
 ## Development setup
 

@@ -39,6 +39,33 @@ as a destructive operation: run it only against a non-production environment, or
 a disposable Supabase branch via `--branch`, and only with authorization that
 explicitly covers write testing.
 
+## Scan scope (`--scope asvs`) does not change the safety posture
+
+The scope axis (`--scope core` vs `--scope asvs`) is **orthogonal** to the
+read-only/write safety axis and does **not** relax either default. `--scope asvs`
+only runs a heavier ASVS probe set and emits a coverage ledger; it stays
+**read-only** by default, still requires the same written authorization as any
+other run, and does **not** enable write probes. Mutation remains gated behind
+`--full` / `--branch` (which require `--yes`), exactly as above — regardless of
+scope.
+
+## SSRF and internal-network probing
+
+Some ASVS-scope probes are **server-side request forgery (SSRF)** checks: they
+submit internal, loopback, private-range, and cloud instance-metadata targets
+(for example `169.254.169.254`, `metadata.google.internal`) as request data,
+attempting to make the **target** open outbound connections to addresses an
+external attacker normally cannot reach. This crosses a distinct trust boundary
+and is **intrusive** — it must fall within the **explicitly authorized scope and
+rules of engagement** for the engagement, not merely general permission to test
+the public surface.
+
+Because of that boundary, the live SSRF probe is **hard-gated**: it stays skipped
+unless `SSRF_PROBE_ACK=1` is set *and* your authorization covers SSRF /
+internal-network testing. The harness only ever **sends** these target strings as
+request payloads — it never connects to them itself — and the reviewable target
+list ships offline at `fixtures/ssrf_targets.txt`.
+
 ## Reporting a vulnerability in StackBadger itself
 
 This policy is about vulnerabilities in **StackBadger**, not in the systems you
