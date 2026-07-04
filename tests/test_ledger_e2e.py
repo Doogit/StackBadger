@@ -46,6 +46,13 @@ _EXAMPLE_PROFILE = _REPO_ROOT / "profiles" / "clerk-supabase-example.yaml"
 # never in the collected set, so it cannot re-invoke itself.
 _TAGGED_MODULE = "tests/test_session.py"
 
+# The coverage-status vocabulary a tag-derived axis (asvs/cwe) rollup can emit
+# (mirrors reports.ledger._STATUS_LABELS). Pinning the enum — not just "some
+# string" — makes a rollup that emits a misspelled/unknown status a failure.
+_AXIS_STATUSES = frozenset(
+    {"covered_passing", "covered_failing", "incomplete", "skipped", "not_run"}
+)
+
 
 def _run_ledger_pipeline(tmp_path: Path) -> dict:
     """Drive the real sidecar->ledger path and return the emitted ledger dict."""
@@ -108,11 +115,31 @@ def _assert_axis(view: object, axis: str) -> None:
     for control_id, entry in view.items():
         assert isinstance(control_id, str) and control_id, f"{axis} id must be a str"
         assert isinstance(entry, dict), f"{axis}[{control_id}] must be a dict"
-        assert isinstance(entry.get("status"), str), f"{axis}[{control_id}] needs a status"
+        assert entry.get("status") in _AXIS_STATUSES, (
+            f"{axis}[{control_id}] has unknown status {entry.get('status')!r}"
+        )
         for count_key in ("passed", "failed", "skipped", "not_run", "total"):
             assert isinstance(entry.get(count_key), int), (
                 f"{axis}[{control_id}] missing int count '{count_key}'"
             )
+        # The per-outcome counts must partition the total — a rollup that miscounts
+        # would otherwise slip past the isinstance checks above.
+        assert (
+            entry["passed"] + entry["failed"] + entry["skipped"] + entry["not_run"]
+            == entry["total"]
+        ), f"{axis}[{control_id}] counts do not sum to total"
+
+    # The join is the point of this e2e: prove the report's outcomes actually
+    # reached the sidecar-indexed controls. If the report<->sidecar join breaks
+    # (nodeid drift, a regressed path derivation, or a rollup that stops consulting
+    # outcomes), every control silently falls back to 'not_run' with valid ints and
+    # a str status — passing every structural check above while crediting zero real
+    # coverage. Against the placeholder host the tagged probes SKIP, so at least one
+    # control must carry a non-'not_run' status for the join to be considered wired.
+    assert any(entry["status"] != "not_run" for entry in view.values()), (
+        f"{axis} view credited no attributed outcome — the report<->sidecar join "
+        "did not reach any tagged control"
+    )
 
 
 def test_all_five_views_present_and_structured(emitted_ledger: dict) -> None:
