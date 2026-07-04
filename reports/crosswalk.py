@@ -103,8 +103,12 @@ def load_dropped(path: str | Path) -> list[dict[str, str]]:
     """Load the static 43-dropped supplement into ``[{'id', 'reason'}, ...]``."""
     try:
         data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-    except yaml.YAMLError as exc:
-        raise CrosswalkError(f"Dropped supplement {path} is not valid YAML: {exc}") from exc
+    except (yaml.YAMLError, OSError, ValueError) as exc:
+        # Mirror load_mapping(): a present but unreadable/non-UTF-8 dropped file
+        # is malformed data and must stay on the exit-3 infra-error path.
+        raise CrosswalkError(
+            f"Dropped supplement {path} is unreadable/not valid YAML: {exc}"
+        ) from exc
     if not isinstance(data, dict) or not isinstance(data.get("dropped"), list):
         raise CrosswalkError(
             f"Dropped supplement {path} is malformed: expected a mapping with a "

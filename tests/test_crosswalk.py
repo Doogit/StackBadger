@@ -125,6 +125,13 @@ def test_load_dropped_rejects_malformed_entry(tmp_path):
         load_dropped(_write(tmp_path / "d.yml", 'dropped:\n  - id: "1.1.1"\n'))  # no reason
 
 
+def test_load_dropped_rejects_non_utf8_bytes(tmp_path):
+    bad = tmp_path / "d.yml"
+    bad.write_bytes(b"\xff\xfe not utf-8")
+    with pytest.raises(CrosswalkError):
+        load_dropped(bad)
+
+
 # ---------------------------------------------------------------------------
 # project_asvs4
 # ---------------------------------------------------------------------------
@@ -307,5 +314,18 @@ def test_ledger_main_maps_malformed_crosswalk_to_infra_exit(tmp_path, monkeypatc
     bad_mapping = tmp_path / "bad-mapping.yml"
     bad_mapping.write_text("- not a mapping\n", encoding="utf-8")
     monkeypatch.setattr(crosswalk, "DEFAULT_MAPPING_PATH", bad_mapping)
+
+    assert main(["--pytest-report", str(report)]) == 3
+
+
+def test_ledger_main_maps_malformed_dropped_data_to_infra_exit(tmp_path, monkeypatch):
+    report = tmp_path / "report.json"
+    report.write_text(
+        json.dumps({"tests": [{"nodeid": "t::a", "outcome": "passed"}]}), encoding="utf-8"
+    )
+    write_sidecar({"t::a": {"asvs": ["6.1.3"], "cwe": []}}, sidecar_path_for(report))
+    bad_dropped = tmp_path / "bad-dropped.yml"
+    bad_dropped.write_bytes(b"\xff\xfe not utf-8")
+    monkeypatch.setattr(crosswalk, "DEFAULT_DROPPED_PATH", bad_dropped)
 
     assert main(["--pytest-report", str(report)]) == 3
