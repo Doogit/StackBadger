@@ -42,6 +42,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from reports import crosswalk
+
 # Suffix the marker sidecar gets relative to the pytest JSON report it pairs
 # with (report.json -> report.asvs-markers.json). One constant, shared by the
 # conftest writer and the ledger reader so they agree on the path.
@@ -288,6 +290,18 @@ def render_summary(ledger: dict[str, Any]) -> str:
                 f" (pass={entry['passed']} fail={entry['failed']}"
                 f" skip={entry['skipped']} n/a={entry['not_run']})"
             )
+    asvs4 = ledger.get("asvs4")
+    if asvs4 is not None:  # present only when the crosswalk data was loaded
+        summary = crosswalk.summarize_asvs4(asvs4)
+        lines.append(
+            f"ASVS 4.0.3 crosswalk (projected from 5.0) - {len(asvs4)} requirement(s):"
+        )
+        for status in _STATUS_LABELS:
+            lines.append(f"  {_STATUS_LABELS[status]:<24} {summary.get(status, 0)}")
+        lines.append(
+            f"  dropped supplement (no 5.0 successor): "
+            f"{len(ledger.get('asvs4_dropped') or [])}"
+        )
     return "\n".join(lines)
 
 
@@ -418,6 +432,13 @@ def main(argv: list[str] | None = None) -> int:
 
     outcomes = outcomes_from_pytest(pytest_data)
     ledger = build_coverage_ledger(sidecar, outcomes)
+    # Project the 5.0 view onto ASVS 4.0.3 (+ dropped supplement) for CASA/Tier-2.
+    # Absent data warns+skips; malformed data fails loud with the exit-3 infra code.
+    try:
+        crosswalk.augment_ledger(ledger)
+    except crosswalk.CrosswalkError as exc:
+        print(f"[error] {exc}", file=sys.stderr)
+        return 3
     ledger["generated_at"] = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     if args.output:
