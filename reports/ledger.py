@@ -272,6 +272,12 @@ _STATUS_LABELS = {
     "not_run": "not run (absent from report)",
 }
 
+_MANIFEST_STATUS_LABELS = {
+    **_STATUS_LABELS,
+    "not_covered": "not covered (no tagged probe)",
+    "not_applicable": "not applicable (justified exclusion)",
+}
+
 
 def render_summary(ledger: dict[str, Any]) -> str:
     """Compact text summary of the coverage ledger (one block per axis)."""
@@ -288,6 +294,18 @@ def render_summary(ledger: dict[str, Any]) -> str:
                 f" (pass={entry['passed']} fail={entry['failed']}"
                 f" skip={entry['skipped']} n/a={entry['not_run']})"
             )
+    manifest = ledger.get("manifest")
+    if manifest is not None:
+        summary = ledger.get("summary", {}).get("manifest", {})
+        lines.append(f"Expected-controls manifest - {len(manifest)} control(s):")
+        for status in _MANIFEST_STATUS_LABELS:
+            lines.append(f"  {_MANIFEST_STATUS_LABELS[status]:<32} {summary.get(status, 0)}")
+        for control_id, entry in manifest.items():
+            if entry["status"] in ("not_covered", "not_applicable"):
+                lines.append(
+                    f"    {control_id:<10} {_MANIFEST_STATUS_LABELS[entry['status']]:<32} "
+                    f"{entry['note']}"
+                )
     return "\n".join(lines)
 
 

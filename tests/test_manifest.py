@@ -284,6 +284,27 @@ def test_ledger_main_attaches_manifest_view_end_to_end(tmp_path):
     assert "manifest" in ledger["summary"]
 
 
+def test_ledger_main_summary_surfaces_manifest_states(tmp_path, capsys):
+    import json
+
+    from reports.ledger import main, sidecar_path_for, write_sidecar
+
+    report = tmp_path / "report.json"
+    report.write_text(
+        json.dumps({"tests": [{"nodeid": "t::sess", "outcome": "passed"}]}),
+        encoding="utf-8",
+    )
+    write_sidecar({"t::sess": {"asvs": ["7.2.4"], "cwe": []}}, sidecar_path_for(report))
+
+    assert main(["--pytest-report", str(report)]) == 0
+
+    text = capsys.readouterr().out
+    assert "Expected-controls manifest" in text
+    assert "not covered (no tagged probe)" in text
+    assert "14.2.1" in text
+    assert "11" in text
+
+
 def test_committed_manifest_loads_and_is_well_formed():
     manifest = load_manifest(DEFAULT_MANIFEST_PATH)
     assert manifest, "committed manifest must not be empty"
