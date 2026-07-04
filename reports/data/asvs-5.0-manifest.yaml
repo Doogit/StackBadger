@@ -99,11 +99,6 @@ controls:
   "10.4.2": {status: n-a, note: "Authorization-code single-use + revocation (L1) -- authorization-server-owned (Google AS enforces it); Track-C attestation, not a probe."}
   "10.4.5": {status: n-a, note: "Refresh-token rotation -- authorization-server-owned (Google AS); Track-C attestation, not a black-box probe."}
 
-  # --- V12 Secure Communication (ZAP-delegated / Track T) ---
-  "12.1.1": {status: n-a, note: "TLS for all client connectivity (L1) -- ZAP-delegated (Track T); native TLS probe is a plan §8.1 stretch, unbuilt."}
-  "12.2.1": {status: n-a, note: "TLS version/cipher strength (L1) -- ZAP-delegated (Track T); native probe unbuilt (plan §8.1 stretch)."}
-  "12.3.1": {status: n-a, note: "Certificate validity/trust (L2) -- ZAP-delegated (Track T); native probe unbuilt (plan §8.1 stretch)."}
-
   # --- V13 Configuration (plan §P2-B) ---
   "13.4.4": {status: expected, note: "HTTP TRACE method disabled (L2) -- test_api_surface.py"}
   "13.4.2": {status: expected, note: "Debug-mode / verbose diagnostics disabled beyond error leakage -- UNBUILT gap; intended test_info_disclosure.py (audit V13 gap)"}
@@ -119,11 +114,12 @@ controls:
   "15.3.3": {status: expected, note: "Mass-assignment (secure-coding view) -- test_mass_assignment.py"}
   "15.3.7": {status: expected, note: "HTTP parameter pollution (HPP) -- UNBUILT gap; intended test_injection.py / test_api_surface.py (audit V15 gap)"}
 
-  # --- V16 Logging & Error Handling ---
+  # --- V16 Logging & Error Handling (audit V16 gap) ---
   "16.5.3": {status: expected, note: "Fail-secure / default-deny on error in security controls -- UNBUILT dedicated probe; intended test_api_surface.py (audit V16 gap; 16.5.1 generic-error is covered)"}
 
   # --- Justified exclusions (asvs-5.0-audit.md N/A + plan §5) ---
   "11": {status: n-a, note: "V11 Cryptography: key management, algorithms and hashing parameters need source/infra access -- structurally unobservable to a black-box prober."}
+  "12": {status: n-a, note: "V12 Secure Communication (TLS version/cipher/cert): ZAP-delegated (Track T); native TLS probe is a plan §8.1 conditional stretch, unbuilt."}
   "17": {status: n-a, note: "V17 WebRTC: no WebRTC/TURN/SRTP/DTLS surface in the supported provider matrix."}
   "4.3": {status: n-a, note: "V4.3 GraphQL: REST/PostgREST stacks; excluded unless a GraphQL endpoint is confirmed present (Phase 0 confirm-absent)."}
   "4.4": {status: n-a, note: "V4.4 WebSocket: no WebSocket surface in the supported stacks; excluded unless confirmed present (Phase 0 confirm-absent)."}
