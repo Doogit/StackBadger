@@ -1,0 +1,26 @@
+name: CI
+
+# Offline self-tests only. Never runs run.sh, ZAP, Docker, or any live target:
+# those require bash + a live authorized host and must never execute in CI.
+on:
+  push:
+  pull_request:
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: pip install -e .
+
+      # Core scope (SCAN_SCOPE unset ⇒ core), read-only (-m "not write_probe").
+      # The example profile uses reserved placeholder hosts, so live probes skip;
+      # only offline harness/unit tests and the ASVS tag-lint execute.
+      - name: Offline self-tests (core scope, read-only)
+        run: python -m pytest tests/ --profile profiles/clerk-supabase-example.yaml -m "not write_probe" -q
