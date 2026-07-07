@@ -77,10 +77,11 @@ def _run_ledger_pipeline(tmp_path: Path) -> dict:
         text=True,
         timeout=120,
     )
-    # pytest exits 0 (all pass) or 1 (some fail); against the placeholder host the
-    # tagged module skips/passes, so demand a clean collection either way.
-    assert proc.returncode in (0, 1), (
-        f"pytest subprocess failed to run (rc={proc.returncode}).\n"
+    # Against the placeholder host this module should only pass/skip. Letting a
+    # real test failure through here would make the ledger e2e look healthy while
+    # the tagged module it relies on has already regressed.
+    assert proc.returncode == 0, (
+        f"pytest subprocess did not stay clean (rc={proc.returncode}).\n"
         f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
     assert report.is_file(), f"pytest JSON report was not written to {report}"
