@@ -547,6 +547,16 @@ fixtures/            Adversarial input files for upload and injection tests
 | `test_api_surface` | Unexpected endpoints, HTTP method enumeration |
 | `test_cors_headers` | CORS misconfiguration, cross-origin credential leakage |
 | `test_info_disclosure` | Stack traces, internal endpoint exposure, version leakage |
+| `test_session` | Session management — replay-after-logout, re-auth gate, fresh-token-on-auth, fixation |
+| `test_oauth_flow` | OAuth client-flow integrity — CSRF `state`, PKCE, scope minimisation, OIDC nonce, token storage |
+| `test_mass_assignment` | Mass assignment / BOPLA — privileged-field injection confirmed by read-back |
+| `test_data_protection` | Data protection — secrets/PII in URLs, cache hygiene (`no-store`), leak-prevention headers |
+| `test_business_logic` | Business-logic abuse — multi-step-flow sequence bypass, per-user quota / anti-automation |
+
+Several modules also carry heavier ASVS probes marked `@pytest.mark.asvs_extended` (including
+`test_auth_bypass`, `test_auth_flows`, `test_injection`, `test_file_upload`, `test_api_surface`,
+and the five modules above); those run only under `--scope asvs` (see
+[Scope](#scope---scope-coreasvs) and [Coverage ledger](#coverage-ledger---scope-asvs)).
 
 Adapter unit tests (`test_clerk_fapi`, `test_firebase_auth_adapter`, `test_nextauth_adapter`,
 `test_supabase_auth_adapter`, `test_discover`, `test_profile_assembler`) validate the harness
@@ -570,6 +580,38 @@ machinery itself and run without a live target.
 > reasons in the report: skips citing missing profile fields mean those attack surfaces were
 > *never tested*, not that they are safe. Fill in the profile (endpoints, `supabase.tables`,
 > provider blocks) to convert skips into real probes.
+
+### Coverage ledger (`--scope asvs`)
+
+An `--scope asvs` run additionally emits a **coverage ledger** to
+`reports/output/coverage-ledger-<ts>.json`. It is built by `reports/ledger.py` from the
+`@pytest.mark.asvs("<id>")` / `@pytest.mark.cwe(<n>)` tags each probe carries, joined against the
+run's pass/skip/fail outcomes. It is **coverage accounting, not findings** — kept deliberately
+separate from `reports/aggregate.py`, which owns the findings and the exit-code gate. A **skip is
+never counted as coverage**: a control whose only probes skipped is rendered `skipped`, never as
+covered.
+
+The ledger carries five dual-mapped views:
+
+| View | What it answers |
+|---|---|
+| **ASVS 5.0** | Coverage rolled up per ASVS 5.0 requirement id (the ids probes are tagged with). |
+| **CWE** | The same probe outcomes rolled up per CWE id. |
+| **ASVS 4.0.3 crosswalk** | The 5.0 view projected onto its 4.0.3 successors via OWASP's own version map — for assessments still graded against 4.0.3. |
+| **4.0-dropped supplement** | The 4.0.3 requirements with no 5.0 successor, so no 5.0-authored probe can cover them (emitted as-is with drop reasons). |
+| **Expected-controls manifest** | A committed set-difference view (`reports/data/asvs-5.0-manifest.yaml`) that surfaces the two states tags alone cannot express. |
+
+The manifest view classifies each declared control by set-difference against what the run actually
+tagged:
+
+- **`not_covered`** — a control the harness *asserts it should probe* but which has **zero tagged
+  nodes** (a probe was never written or its tag was dropped): a coverage gap.
+- **`not_applicable`** — a control **deliberately excluded** from this black-box harness by written
+  justification (e.g. internal crypto, absent stack surface).
+
+This ledger is an **internal evidence index** — StackBadger's own coverage accounting to find gaps
+before an audit. It is **not** a Google- or assessor-submitted artifact, and it grades nothing on
+its own.
 
 ### Exit codes
 

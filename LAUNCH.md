@@ -334,10 +334,23 @@ them from the known platform-dependent findings listed in the README. Map unreco
 the README [Troubleshooting table](README.md#troubleshooting).
 
 **`--scope asvs` only:** a coverage ledger is also written to
-`reports/output/coverage-ledger-<ts>.json` (ASVS-5.0 + CWE views). It is a **coverage** accounting
-artifact, not findings — a skipped probe renders as `skipped`, never as covered — and does **not**
-affect the exit code (the findings-severity gate above is authoritative). A ledger failure warns but
-never fails the run.
+`reports/output/coverage-ledger-<ts>.json` (ASVS-5.0, CWE, ASVS-4.0.3 crosswalk + dropped
+supplement, and the expected-controls manifest views). It is a **coverage** accounting artifact,
+not findings — a skipped probe renders as `skipped`, never as covered — and does **not** affect the
+exit code. The exit code comes solely from `aggregate.py`'s findings-severity gate above; a ledger
+failure warns but never fails the run. Keep the two separate: the ledger tells you *what was
+exercised*, the exit code tells you *what was found*.
+
+Reading it — each control carries a per-control status:
+
+- `covered_passing` / `covered_failing` — every tagged probe ran; a `covered_failing` control has a
+  real finding (already surfaced by the findings gate).
+- `incomplete` — some tagged probes ran but others did not; the evidence is partial, so the control
+  is **not** credited as covered.
+- `skipped` — every tagged probe skipped (provider/config absent). **Not coverage.**
+- In the expected-controls manifest view only: **`not_covered`** = a control the harness asserts it
+  should probe but which has **zero tagged nodes** (a coverage gap — investigate), and
+  **`not_applicable`** = a justified, documented exclusion. Neither is a finding.
 
 ### Step 7: Post-run recap
 
@@ -372,6 +385,13 @@ never fails the run.
    Stripe default for a no-profile run), and note any test modules that skipped because their
    provider was absent or config was missing. A skip for missing profile fields means that
    surface was **never tested**, not that it passed — say so explicitly.
+
+5. **A green `--scope asvs` run is not CASA-complete.** The coverage ledger is a harness-internal
+   gap-finder, not an assessment verdict. Several CASA tracks remain manual and are **out of scope
+   for this automated run**: the documentation artifacts, Google restricted-scope confirmation,
+   ZAP / TLS coverage, and the attestation / sign-off. Do not report a clean run as passing CASA —
+   report it as "no findings in the automated ASVS-scope probes," and name the outstanding manual
+   tracks.
 
 ### Step 8: Teardown (required if Step 3a provisioned accounts)
 
