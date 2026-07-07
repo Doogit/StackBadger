@@ -60,7 +60,7 @@ controls:
   # --- V5 File Handling (plan §P2-C) ---
   "5.2.3": {status: expected, note: "Zip-bomb / uncompressed-size limit -- test_file_upload.py"}
   "5.4.1": {status: expected, note: "Content-Disposition on file serve -- test_file_upload.py"}
-  "5.4.3": {status: expected, note: "Server-side AV/malware scan on upload (L2, where the target claims scanning; EICAR probe) -- UNBUILT gap; intended test_file_upload.py (audit V5 gap, plan §P2-C)"}
+  "5.4.3": {status: n-a, note: "Server-side AV/malware scan on upload (L2) -- no reliable black-box signal distinguishes scan-pass vs no scanner vs async quarantine; documented harness exclusion in test_file_upload.py."}
 
   # --- V6 Authentication deltas (plan §P2-D) ---
   "6.2.2": {status: expected, note: "Registration-time weak-password acceptance -- test_auth_flows.py"}
