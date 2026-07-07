@@ -315,6 +315,12 @@ def test_committed_manifest_loads_and_is_well_formed():
         assert not control_id.upper().startswith("V")
 
 
+def test_committed_manifest_keeps_upload_av_scan_not_applicable():
+    manifest = load_manifest(DEFAULT_MANIFEST_PATH)
+    assert manifest["5.4.3"]["status"] == "n-a"
+    assert "black-box" in manifest["5.4.3"]["note"]
+
+
 def test_committed_manifest_accounts_for_every_asvs_tag_in_tests():
     # Reconcile asserted vs observed: every @pytest.mark.asvs("id") tagged on a
     # probe must be listed (as `expected`) in the committed manifest. This is the
