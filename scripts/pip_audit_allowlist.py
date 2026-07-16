@@ -10,8 +10,15 @@ time-boxed allowlist real:
      ``pip-audit`` re-flags that advisory and the job fails. This is what makes
      expiry enforced rather than decorative.
   3. Expand the surviving ids to repeated ``--ignore-vuln <ID>`` args.
-  4. Invoke ``pip-audit`` against the installed environment and propagate its
-     exit code.
+  4. Invoke ``pip-audit`` against the local project dependency graph (``.``)
+     and propagate its exit code.
+
+Auditing ``.`` (the project) rather than the installed environment is
+deliberate: the CI job first runs ``pip install -e .``, so an environment audit
+would try to resolve the editable root ``stackbadger`` from PyPI and fail under
+``--strict``. Targeting ``.`` audits StackBadger's own declared dependency
+graph and excludes the scanner tooling (``pip-audit``/``cyclonedx-bom``)
+installed alongside it.
 
 A malformed allowlist line fails loudly (non-zero) rather than being silently
 skipped: a typo must never silently widen suppression.
@@ -84,10 +91,16 @@ def parse_allowlist(text: str, today: datetime.date) -> list[str]:
 
 
 def build_args(ids: list[str]) -> list[str]:
-    """Base ``pip-audit`` invocation plus one ``--ignore-vuln`` per surviving id."""
+    """Base ``pip-audit`` invocation plus one ``--ignore-vuln`` per surviving id.
+
+    The trailing ``.`` targets the local project dependency graph rather than the
+    installed environment (which would fail on the editable ``stackbadger`` root
+    under ``--strict``).
+    """
     args = ["pip-audit", "--strict"]
     for vuln_id in ids:
         args += ["--ignore-vuln", vuln_id]
+    args.append(".")
     return args
 
 

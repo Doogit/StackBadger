@@ -108,7 +108,8 @@ def test_parse_regex_valid_but_invalid_calendar_date_raises():
 # ---------------------------------------------------------------------------
 
 def test_build_args_empty_has_no_ignore_flags():
-    assert w.build_args([]) == ["pip-audit", "--strict"]
+    # Trailing "." targets the project graph, not the installed environment.
+    assert w.build_args([]) == ["pip-audit", "--strict", "."]
 
 
 def test_build_args_expands_one_ignore_vuln_per_id():
@@ -116,6 +117,7 @@ def test_build_args_expands_one_ignore_vuln_per_id():
         "pip-audit", "--strict",
         "--ignore-vuln", "A",
         "--ignore-vuln", "B",
+        ".",
     ]
 
 
@@ -153,7 +155,7 @@ def test_main_propagates_pip_audit_exit_code(tmp_path, monkeypatch):
     monkeypatch.setattr(w.subprocess, "run", fake_run)
     assert w.main(["--allowlist", str(empty)]) == 1
     # Empty allowlist -> no suppression args passed to pip-audit.
-    assert captured["cmd"] == ["pip-audit", "--strict"]
+    assert captured["cmd"] == ["pip-audit", "--strict", "."]
 
 
 def test_main_passes_unexpired_id_to_pip_audit(tmp_path, monkeypatch):
@@ -169,5 +171,5 @@ def test_main_passes_unexpired_id_to_pip_audit(tmp_path, monkeypatch):
     monkeypatch.setattr(w.subprocess, "run", fake_run)
     assert w.main(["--allowlist", str(al)]) == 0
     assert captured["cmd"] == [
-        "pip-audit", "--strict", "--ignore-vuln", "GHSA-keep",
+        "pip-audit", "--strict", "--ignore-vuln", "GHSA-keep", ".",
     ]
