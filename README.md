@@ -342,7 +342,7 @@ accounts are deleted the same way they were created (dashboard).
 | `PENTEST_USER_A_EMAIL` / `_PASSWORD` | Yes | Test account A. |
 | `PENTEST_USER_B_EMAIL` / `_PASSWORD` | Yes (IDOR tests) | Test account B (cross-user probes). |
 | `TARGET_BASE_URL` | No | Overrides the target URL CLI argument. |
-| `SCAN_SCOPE` | No | `core` (default) or `asvs` — the scope axis (see [Scope](#scope---scope-coreasvs)). `run.sh --scope` exports it; the raw-pytest dev path sets it directly to run `asvs_extended` probes and emit the coverage ledger. |
+| `SCAN_SCOPE` | No | `core` (default) or `asvs` — the scope axis (see [Scope](#scope---scope-coreasvs)). `run.sh --scope` exports it and emits the coverage ledger; the raw-pytest dev path sets it directly to run `asvs_extended` probes and write the marker sidecar that `reports.ledger` consumes. |
 | `SUPABASE_ACCESS_TOKEN` | No | Supabase Management API token — required only for `--branch`. (It cannot call the GoTrue Admin API — see `SUPABASE_SERVICE_ROLE_KEY`.) |
 | `SUPABASE_SERVICE_ROLE_KEY` | No | Project service-role key — required only by `provision_accounts.py` / `teardown.py` (the Admin API accepts nothing else). Never echoed; keep it out of transcripts. |
 | `PENTEST_USER_A_ID` / `_B_ID` | No | Written by `provision_accounts.py`; used by `teardown.py` to delete by ID. |
