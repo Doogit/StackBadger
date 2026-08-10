@@ -53,6 +53,18 @@ python -m pytest tests/ --profile profiles/firebase-example.yaml
 4. Confirm the new profile loads and skips live tests:
    `python -m pytest tests/ --profile profiles/<new>.yaml`.
 
+## Continuous integration
+
+CI runs two independent jobs (offline only — never `run.sh`, ZAP, Docker, or a live target):
+
+- **`offline-tests`** — the profile-driven suite on `clerk-supabase-example.yaml` in core scope,
+  read-only (`-m "not write_probe"`); this is where the ASVS tag-lint runs.
+- **`sca`** — a Track B supply-chain gate over StackBadger's *own* pip tree: it generates a
+  CycloneDX SBOM and runs a blocking `pip-audit` vulnerability check. A flagged CVE fails the
+  build; suppress one only via the time-boxed allowlist (`.github/pip-audit-allowlist.txt`,
+  enforced by `scripts/pip_audit_allowlist.py` — expired entries are re-flagged). This gates the
+  harness's own dependencies, not the assessed app's.
+
 ## Pull requests
 
 - Keep changes focused and include tests for new behavior.
