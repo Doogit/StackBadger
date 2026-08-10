@@ -8,6 +8,9 @@ report.json
 # Internal planning docs (local only — not for publication)
 docs/plans/
 
+# Local compliance evidence (companion-track attestations/templates; local-only per KTD-1)
+docs/compliance/
+
 # Generated files
 reports/output/
 reports/evidence/
