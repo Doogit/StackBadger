@@ -342,7 +342,7 @@ accounts are deleted the same way they were created (dashboard).
 | `PENTEST_USER_A_EMAIL` / `_PASSWORD` | Yes | Test account A. |
 | `PENTEST_USER_B_EMAIL` / `_PASSWORD` | Yes (IDOR tests) | Test account B (cross-user probes). |
 | `TARGET_BASE_URL` | No | Overrides the target URL CLI argument. |
-| `SCAN_SCOPE` | No | `core` (default) or `asvs` — the scope axis (see [Scope](#scope---scope-coreasvs)). `run.sh --scope` exports it; the raw-pytest dev path sets it directly to run `asvs_extended` probes and emit the coverage ledger. |
+| `SCAN_SCOPE` | No | `core` (default) or `asvs` — the scope axis (see [Scope](#scope---scope-coreasvs)). `run.sh --scope` exports it and emits the coverage ledger; the raw-pytest dev path sets it directly to run `asvs_extended` probes and write the marker sidecar that `reports.ledger` consumes. |
 | `SUPABASE_ACCESS_TOKEN` | No | Supabase Management API token — required only for `--branch`. (It cannot call the GoTrue Admin API — see `SUPABASE_SERVICE_ROLE_KEY`.) |
 | `SUPABASE_SERVICE_ROLE_KEY` | No | Project service-role key — required only by `provision_accounts.py` / `teardown.py` (the Admin API accepts nothing else). Never echoed; keep it out of transcripts. |
 | `PENTEST_USER_A_ID` / `_B_ID` | No | Written by `provision_accounts.py`; used by `teardown.py` to delete by ID. |
@@ -412,6 +412,13 @@ stack:
   payments: stripe       # stripe | paddle | lemonsqueezy  (string or list)
   hosting: netlify       # netlify | vercel | cloudflare (informational)
 
+auth:                    # Optional fast-fail run after sign-in.
+  verify_path: /api/user/profile   # API route returning 401/403 to anon, 2xx when signed in. run.sh/
+                                    # doctor.py request it per-account and abort on 401/403 (catches a
+                                    # wrong stack.auth adapter or dead account early). Root-relative —
+                                    # resolves against the target ORIGIN. NOT an app page (CDN-cached
+                                    # pages 200 to anon and verify nothing). Unset -> skipped with a warning.
+
 # --- Provider config blocks (include the one(s) matching stack) ---
 
 supabase:                              # auth: supabase-auth and/or database/storage: supabase
@@ -453,6 +460,16 @@ payments:                              # Paddle / LemonSqueezy webhook paths onl
   paddle_webhook_path: "/api/webhooks/paddle"        # Stripe is declared under endpoints.webhook
   lemonsqueezy_webhook_path: "/api/webhooks/lemonsqueezy"   # with signature: stripe (see below).
 
+oauth:                                 # §P1-B client-observable + §P1-D token-storage probes (all fields optional).
+  delegated_send:                      # App does an OAuth "send on my behalf" flow (tokens stay server-side).
+    provider: google                   # google | microsoft
+    authorize_url: /api/oauth/google/authorize        # App route that 302s to the AS; probe reads Location for state/PKCE/scope.
+    redirect_uris: ["https://example.com/api/oauth/google/callback"]
+    token_endpoint: /api/oauth/google/token           # App's BFF token-exchange route, if it exposes one.
+    required_scopes: ["https://www.googleapis.com/auth/gmail.send"]   # Baseline; an authorize asking for more is flagged.
+    send_endpoints:   [{path: /api/email/send, method: POST}]         # Set probe_body (a safe test recipient) to fire the write-probe; else skips.
+    status_endpoints: [{path: /api/oauth/google/status, method: GET}] # Token-leakage probe checks these never echo a token.
+
 # --- Structural metadata (drives endpoint-specific probes) ---
 
 endpoints:
@@ -485,6 +502,21 @@ uploads:                               # File-upload abuse probe config.
   valid_fixture: fixtures/records.csv
   served_sample_url: https://cdn.example.com/uploads/sample.csv   # Optional: a retrievable URL of an already-stored upload; enables the serve-time Content-Disposition + nosniff probe (ASVS 5.4.1, CWE-434). Skips when unset.
 
+business_logic:                        # §P2-G probes (all optional; each section skips cleanly when absent).
+  flows:                               # Step-sequence enforcement (ASVS V2.3.1 / CWE-841).
+    - name: checkout                   # Optional label shown in the report.
+      gated_step: {path: /checkout/confirm, method: POST}   # Step that MUST reject when called out of order (probe_body optional).
+      reject_statuses: [409, 425]      # Optional; order-rejection codes (default 409/425).
+      success_field: order.id          # Optional; JSON field (dotted) present ONLY on genuine completion — its presence proves a bypass.
+  quota:                               # Per-user quota / anti-automation (ASVS V2.4.1 / CWE-799).
+    endpoint: {path: /api/generate, method: POST}
+    burst: 5                           # Requests to send (>= 2; a single request can't observe a per-user limit).
+    limit_statuses: [429]              # Optional; statuses that indicate the quota fired.
+
+exclude_paths: [/admin/reset-demo]     # Endpoint paths probes must never hit (prefix, case-insensitive, segment-boundary).
+                                       # UNION with built-in defaults (see exclusions.py). Endpoint paths ONLY — not PostgREST tables.
+exclude_tables: [dangerous_audit_table]   # supabase.tables names to skip in PostgREST/IDOR enumeration (exact name, case-insensitive).
+
 sensitive_patterns: ["at Object.", "/var/task/", "SyntaxError"]   # Info-disclosure leak markers.
 custom_headers: {anon_session: "x-anon-session"}
 features: {anon_sessions: true}
@@ -495,8 +527,12 @@ test_accounts:
   user_b: {email: "pentest-b@example.com"}
 ```
 
-Two ready-made profiles ship as references: `profiles/clerk-supabase-example.yaml` (Clerk + Supabase +
-Stripe + Netlify) and `profiles/firebase-example.yaml` (Firebase + Firestore).
+Six ready-made profiles ship as references: `profiles/clerk-supabase-example.yaml` (Clerk + Supabase
++ Stripe + Netlify), `profiles/firebase-example.yaml` (Firebase + Firestore),
+`profiles/supabase-auth-example.yaml` (Supabase Auth + delegated OAuth), `profiles/nextauth-example.yaml`
+(NextAuth/Auth.js), `profiles/s3-r2-example.yaml` (S3 / R2 storage), and
+`profiles/paddle-lemonsqueezy-example.yaml` (Paddle / LemonSqueezy webhooks). All use reserved
+placeholder hosts, so live probes skip.
 
 ## Architecture
 
@@ -560,7 +596,9 @@ and the five modules above); those run only under `--scope asvs` (see
 
 Adapter unit tests (`test_clerk_fapi`, `test_firebase_auth_adapter`, `test_nextauth_adapter`,
 `test_supabase_auth_adapter`, `test_discover`, `test_profile_assembler`) validate the harness
-machinery itself and run without a live target.
+machinery itself and run without a live target. The ASVS coverage layer has its own offline tests —
+`test_ledger`, `test_crosswalk`, `test_manifest`, `test_scope_flag`, and `test_asvs_tag_lint` (an AST
+lint asserting every `asvs_extended` probe carries matching `asvs`/`cwe` tags; it also runs in CI).
 
 ## Reports
 
@@ -591,7 +629,10 @@ separate from `reports/aggregate.py`, which owns the findings and the exit-code 
 never counted as coverage**: a control whose only probes skipped is rendered `skipped`, never as
 covered.
 
-The ledger carries five dual-mapped views:
+The ledger carries up to five dual-mapped views. The ASVS 5.0 and CWE views are always emitted; the
+ASVS 4.0.3 crosswalk, the 4.0-dropped supplement, and the expected-controls manifest appear only when
+their source files under `reports/data/` load — if a source is absent or malformed the run warns and
+skips that view rather than failing, and the remaining accounting stays correct.
 
 | View | What it answers |
 |---|---|

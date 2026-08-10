@@ -12,9 +12,9 @@ This is deliberately separate from ``reports/aggregate.py``: aggregate builds
 the ledger builds *coverage accounting* and ingests ALL outcomes — a skip is NOT
 coverage and is rendered as such, never as a pass.
 
-Scope (PR1): ASVS-5.0 and CWE views rolled up from the tagged-node universe.
-The expected-controls manifest (``not-covered`` / ``N-A`` by set-difference) and
-the ASVS-4.0 crosswalk view are later tiers and not computed here.
+Scope (Tier-2): ASVS-5.0 and CWE views rolled up from the tagged-node universe,
+plus the ASVS-4.0.3 crosswalk, 4.0-dropped supplement, and expected-controls
+manifest view when their vendored data files load.
 
 Usage:
     python -m reports.ledger \\
