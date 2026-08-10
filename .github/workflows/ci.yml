@@ -24,3 +24,49 @@ jobs:
       # only offline harness/unit tests and the ASVS tag-lint execute.
       - name: Offline self-tests (core scope, read-only)
         run: python -m pytest tests/ --profile profiles/clerk-supabase-example.yaml -m "not write_probe" -q
+
+  # Supply-chain hygiene for StackBadger's OWN pip tree (Track B): SBOM + a
+  # blocking dependency-vulnerability gate. Kept a SEPARATE job from
+  # offline-tests so a scan failure and a test failure never mask each other.
+  # This scans the harness's own hygiene; it is NOT the assessed app's SCA.
+  sca:
+    runs-on: ubuntu-latest
+    # ci.yml declares no top-level permissions and would inherit the default
+    # token scope; these two tools are the security gate itself, so pin it down.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: pip install -e .
+
+      # Exact-version pins: these two packages ARE the gate, so a floating
+      # install would let a compromised scanner mask findings. cyclonedx-py
+      # ships in cyclonedx-bom. Hardening follow-up: --require-hashes lock.
+      - name: Install SCA tools (pinned)
+        run: pip install "pip-audit==2.10.1" "cyclonedx-bom==7.3.0"
+
+      # Full installed closure (environment scope): every installed dist +
+      # transitive dep, not just the declared runtime set. With no interpreter
+      # arg, cyclonedx-py inspects its own environment — here the setup-python
+      # interpreter that ran `pip install -e .`. cyclonedx-py does NOT infer
+      # format from the filename, so pass explicit output flags.
+      - name: Generate SBOM (CycloneDX, full installed closure)
+        run: cyclonedx-py environment --output-format JSON --output-file sbom.cdx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cdx.json
+
+      # Blocking vuln gate. The wrapper enforces the time-boxed allowlist:
+      # it drops expired entries (re-flagging them) and expands survivors to
+      # --ignore-vuln args, then runs pip-audit against the installed env.
+      - name: Dependency vulnerability gate (pip-audit + expiry-enforced allowlist)
+        run: python scripts/pip_audit_allowlist.py

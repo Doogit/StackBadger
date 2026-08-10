@@ -1,0 +1,22 @@
+# pip-audit allowlist — accepted-but-time-boxed dependency advisories.
+#
+# This file is CONSUMED BY scripts/pip_audit_allowlist.py, which drops any
+# entry whose expiry has passed (so pip-audit re-flags it and the SCA job
+# fails) and passes the survivors to pip-audit as --ignore-vuln args.
+#
+# Entry format (one per line):
+#   <VULN-ID>  # expires:YYYY-MM-DD — <justification>
+# where <VULN-ID> is a pip-audit id (GHSA-…, PYSEC-…, or CVE-…). Blank lines
+# and full-line "#" comments are ignored.
+#
+# DISCLOSURE TENSION (KTD-1): this repo is public. Every id listed here is
+# publicly disclosed as an accepted, currently-unmitigated advisory against a
+# pinned StackBadger dependency, in a tool that runs with live target
+# credentials. Add an entry only when the exposure of that fact is acceptable.
+#
+# JUSTIFICATION RULE: state only the DISPOSITION (e.g. "accepted pending
+# upstream fix", "no fixed version yet"). Do NOT narrate why the CVE is
+# believed non-exploitable — that reasoning is attacker-useful and goes stale.
+#
+# Baseline is intentionally empty: the gate blocks on ANY un-allowlisted
+# advisory. Add entries only to time-box a specific accepted advisory.
